@@ -1,9 +1,9 @@
 from pathlib import Path
 from urllib.parse import quote
-import csv
 import re
 import traceback
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from openpyxl import Workbook
+from playwright.sync_api import sync_playwright
 
 QUERIES = [
     "용인 맛집",
@@ -29,6 +29,44 @@ def save_shot(page, name: str):
         page.screenshot(path=str(SCREENSHOT_DIR / name), full_page=True)
     except Exception:
         pass
+
+
+def normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip()
+
+
+def is_noise_row(name: str, raw_text: str) -> bool:
+    combined = f"{name} {raw_text}".strip()
+
+    noise_patterns = [
+        "새로 오픈했어요",
+        "결과보기",
+        "플레이스 필터",
+        "영업중",
+        "포장주문",
+        "실시간예약",
+        "쿠폰",
+        "주차",
+        "단체석",
+        "특별한메뉴",
+        "고깃집",
+        "삼겹살",
+        "영업 종료",
+    ]
+
+    # 이름이 너무 짧거나 UI 문구면 제거
+    if len(name.strip()) <= 1:
+        return True
+
+    # 완전 숫자만/페이지 번호 비슷한 것 제거
+    if re.fullmatch(r"\d+", name.strip()):
+        return True
+
+    for p in noise_patterns:
+        if combined == p or combined.startswith(p):
+            return True
+
+    return False
 
 
 def first_working_locator(container, selectors, timeout=5000):
@@ -81,14 +119,11 @@ def goto_naver_and_search(page, query: str):
 
 
 def open_filter_on_search_result(page):
-    # 검색결과 페이지에서 '플레이스' 영역의 필터 버튼 클릭
     page.wait_for_timeout(3000)
 
-    # 플레이스 영역이 보이는지 먼저 확인
     if "search.naver.com" not in page.url:
         return False
 
-    # 1차: 영업중 버튼 앞의 필터 버튼 추정 클릭
     clicked = page.evaluate("""
     () => {
         const bodyText = document.body.innerText || "";
@@ -111,7 +146,6 @@ def open_filter_on_search_result(page):
         save_shot(page, "03_filter_open_try1.png")
         return True
 
-    # 2차: 플레이스 텍스트 근처 첫 버튼 클릭 시도
     clicked = page.evaluate("""
     () => {
         const walker = Array.from(document.querySelectorAll("div, section, article"));
@@ -133,7 +167,6 @@ def open_filter_on_search_result(page):
 
 
 def apply_new_open_filter_on_search_result(page):
-    # 검색결과 필터 모달에서 새로오픈 클릭 + 결과보기 클릭
     page.wait_for_timeout(1500)
 
     clicked_new = click_if_exists(page, [
@@ -170,7 +203,6 @@ def goto_map_search_direct(page, query: str):
 
 
 def click_new_open_on_map(page):
-    # map.naver.com 화면의 새로오픈 클릭
     clicked = click_if_exists(page, [
         "text=새로오픈",
         "button:has-text('새로오픈')",
@@ -183,8 +215,20 @@ def click_new_open_on_map(page):
     return clicked
 
 
+def check_new_open_applied(page) -> bool:
+    try:
+        body = normalize_text(page.locator("body").inner_text(timeout=5000))
+    except Exception:
+        return False
+
+    # 약한 확인이지만 새로오픈 텍스트가 살아있고 map 페이지면 통과
+    if "map.naver.com" in page.url and "새로오픈" in body:
+        return True
+
+    return False
+
+
 def get_list_context(page):
-    # page 본문에 목록이 있으면 page 반환, iframe 안에 있으면 frame 반환
     try:
         if page.locator("#_pcmap_list_scroll_container").count() > 0:
             return page
@@ -258,18 +302,30 @@ def extract_cards(ctx, query, page_no):
     for i in range(count):
         card = cards.nth(i)
         try:
-            text = card.inner_text(timeout=2000).strip()
+            text = normalize_text(card.inner_text(timeout=2000))
         except Exception:
             continue
 
         if not text:
             continue
 
-        lines = [x.strip() for x in text.splitlines() if x.strip()]
+        lines = [normalize_text(x) for x in text.split("|") if normalize_text(x)]
+        if not lines:
+            # 줄바꿈 기준 재시도
+            try:
+                raw_lines = card.inner_text(timeout=2000).splitlines()
+                lines = [normalize_text(x) for x in raw_lines if normalize_text(x)]
+            except Exception:
+                lines = []
+
         if not lines:
             continue
 
-        name = lines[0]
+        name = normalize_text(lines[0])
+
+        if is_noise_row(name, text):
+            continue
+
         href = ""
         try:
             href = card.locator("a").first.get_attribute("href") or ""
@@ -281,7 +337,7 @@ def extract_cards(ctx, query, page_no):
             "page": page_no,
             "rank": i + 1,
             "name": name,
-            "raw_text": " | ".join(lines),
+            "raw_text": text,
             "href": href,
         })
     return rows
@@ -354,24 +410,36 @@ def click_next_page_block(ctx, page):
     return False
 
 
-def save_csv(rows):
-    path = OUTPUT_DIR / "results.csv"
-    with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=["query", "page", "rank", "name", "raw_text", "href"]
-        )
-        writer.writeheader()
-        writer.writerows(rows)
+def save_excel(rows, summary_rows):
+    wb = Workbook()
+
+    ws = wb.active
+    ws.title = "Results"
+    ws.append(["query", "page", "rank", "name", "raw_text", "href"])
+
+    for row in rows:
+        ws.append([
+            row["query"],
+            row["page"],
+            row["rank"],
+            row["name"],
+            row["raw_text"],
+            row["href"],
+        ])
+
+    ws2 = wb.create_sheet("Summary")
+    ws2.append(["item", "value"])
+    for item, value in summary_rows:
+        ws2.append([item, value])
+
+    wb.save(OUTPUT_DIR / "results.xlsx")
 
 
 def run_one_query(page, query):
     all_rows = []
-    seen = set()
 
     print(f"[START] {query}")
 
-    # 1) 네이버 메인 → 검색결과 → 필터 → 새로오픈 → 결과보기
     goto_naver_and_search(page, query)
 
     opened = open_filter_on_search_result(page)
@@ -383,19 +451,20 @@ def run_one_query(page, query):
     else:
         applied = False
 
-    # 2) 실패하면 map 직접 진입 후 새로오픈 클릭
     if "map.naver.com" not in page.url:
         goto_map_search_direct(page, query)
         click_new_open_on_map(page)
     else:
-        # 이미 map으로 넘어왔더라도 새로오픈이 안 먹었을 수 있으니 한 번 더 시도
         click_new_open_on_map(page)
+
+    filter_ok = check_new_open_applied(page)
+    print(f"[새로오픈 적용 확인] {filter_ok}")
 
     save_shot(page, f"{safe_name(query)}_08_before_collect.png")
 
-    # 3) 목록 수집
     ctx = get_list_context(page)
 
+    seen = set()
     block_index = 0
     max_blocks = 5
 
@@ -414,8 +483,8 @@ def run_one_query(page, query):
                     continue
 
             scroll_list_to_end(ctx, page)
-
             rows = extract_cards(ctx, query, page_no)
+
             for row in rows:
                 key = (row["query"], row["name"], row["raw_text"])
                 if key in seen:
@@ -433,11 +502,12 @@ def run_one_query(page, query):
 
         block_index += 1
 
-    return all_rows
+    return all_rows, filter_ok
 
 
 def main():
     collected = []
+    summary_rows = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -448,8 +518,10 @@ def main():
 
         try:
             for query in QUERIES:
-                rows = run_one_query(page, query)
+                rows, filter_ok = run_one_query(page, query)
                 collected.extend(rows)
+                summary_rows.append((f"{query}_new_open_applied", str(filter_ok)))
+                summary_rows.append((f"{query}_count", len(rows)))
 
         except Exception as e:
             save_shot(page, "ERROR_last_screen.png")
@@ -460,7 +532,8 @@ def main():
         finally:
             browser.close()
 
-    save_csv(collected)
+    summary_rows.append(("total_count", len(collected)))
+    save_excel(collected, summary_rows)
     save_text("summary.txt", f"총 수집 건수: {len(collected)}")
     print(f"[DONE] 총 수집 건수: {len(collected)}")
 
