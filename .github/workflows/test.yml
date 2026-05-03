@@ -1,22 +1,32 @@
-name: Test Bot
+name: Playwright Screenshot
 
 on:
   workflow_dispatch:
 
 jobs:
-  test:
+  screenshot:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Create output file
-        run: |
-          mkdir -p output
-          echo "GitHub Actions works" > output/test.txt
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
 
-      - name: Upload output
+      - name: Install Playwright
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
+          python -m playwright install chromium --with-deps
+
+      - name: Run script
+        run: |
+          python main.py
+
+      - name: Upload screenshot
         uses: actions/upload-artifact@v7
         with:
           name: output
