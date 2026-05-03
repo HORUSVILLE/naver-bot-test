@@ -1,9 +1,10 @@
 from pathlib import Path
 import csv
 import re
+from urllib.parse import quote
 from playwright.sync_api import sync_playwright
 
-# 먼저 1개 키워드만 테스트
+# 먼저 1개 검색어만 테스트
 QUERIES = [
     "용인 맛집",
 ]
@@ -19,31 +20,37 @@ def safe_name(text: str) -> str:
 
 
 def get_search_frame(page):
-    page.wait_for_selector("iframe#searchIframe", timeout=30000)
-    handle = page.locator("iframe#searchIframe").element_handle()
-    if not handle:
-        raise RuntimeError("searchIframe 못 찾음")
-    frame = handle.content_frame()
-    if not frame:
-        raise RuntimeError("searchIframe content_frame 못 찾음")
-    return frame
+    for _ in range(20):
+        try:
+            page.wait_for_selector("iframe#searchIframe", timeout=3000)
+            handle = page.locator("iframe#searchIframe").element_handle()
+            if handle:
+                frame = handle.content_frame()
+                if frame:
+                    return frame
+        except:
+            pass
+        page.wait_for_timeout(1000)
+
+    raise RuntimeError("searchIframe 못 찾음")
 
 
-def search_keyword(page, query: str):
-    page.goto("https://map.naver.com/p", wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(5000)
+def open_search_results(page, query: str):
+    encoded = quote(query)
+    url = f"https://map.naver.com/p/search/{encoded}"
 
-    search_box = page.locator("input[placeholder*='검색어']").first
-    search_box.click()
-    search_box.fill(query)
-    search_box.press("Enter")
+    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    page.wait_for_timeout(7000)
 
-    page.wait_for_timeout(5000)
+    page.screenshot(
+        path=str(SCREENSHOT_DIR / f"{safe_name(query)}_00_loaded.png"),
+        full_page=True
+    )
+
     return get_search_frame(page)
 
 
 def click_new_open(frame, page):
-    # 새로오픈 칩 클릭
     candidates = [
         frame.get_by_text("새로오픈", exact=True).first,
         frame.locator("a,button,span").filter(has_text="새로오픈").first,
@@ -51,8 +58,8 @@ def click_new_open(frame, page):
 
     for loc in candidates:
         try:
-            loc.click(timeout=3000)
-            page.wait_for_timeout(3000)
+            loc.click(timeout=5000)
+            page.wait_for_timeout(4000)
             return True
         except:
             pass
@@ -61,8 +68,7 @@ def click_new_open(frame, page):
 
 
 def scroll_list_to_end(frame, page):
-    container = frame.locator("#_pcmap_list_scroll_container").first
-    container.wait_for(timeout=15000)
+    frame.wait_for_selector("#_pcmap_list_scroll_container", timeout=15000)
 
     last_height = -1
     same_count = 0
@@ -112,7 +118,7 @@ def get_visible_page_numbers(frame):
                     null
                 );
 
-                for (let i = 0; i < snapshot.snapshotLength && i < 30; i++) {
+                for (let i = 0; i < snapshot.snapshotLength && i < 40; i++) {
                     const el = snapshot.snapshotItem(i);
                     const txt = (el.textContent || "").trim();
                     if (/^\\d+$/.test(txt)) {
@@ -161,8 +167,12 @@ def click_next_page_block(frame, page):
 
 def extract_cards(frame, query: str, page_no: int):
     rows = []
-    cards = frame.locator("#_pcmap_list_scroll_container ul > li")
-    count = cards.count()
+
+    try:
+        cards = frame.locator("#_pcmap_list_scroll_container ul > li")
+        count = cards.count()
+    except:
+        count = 0
 
     for i in range(count):
         card = cards.nth(i)
@@ -214,17 +224,26 @@ def main():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page(viewport={"width": 1600, "height": 1200}, locale="ko-KR")
+        page = browser.new_page(
+            viewport={"width": 1600, "height": 1200},
+            locale="ko-KR"
+        )
 
         for query in QUERIES:
             print(f"[START] {query}")
-            frame = search_keyword(page, query)
+
+            frame = open_search_results(page, query)
 
             clicked = click_new_open(frame, page)
             print(f"[새로오픈 클릭 여부] {clicked}")
 
+            page.screenshot(
+                path=str(SCREENSHOT_DIR / f"{safe_name(query)}_01_after_new_open.png"),
+                full_page=True
+            )
+
             block_index = 0
-            max_blocks = 5  # 필요하면 늘려도 됨
+            max_blocks = 5
 
             while block_index < max_blocks:
                 visible_pages = get_visible_page_numbers(frame)
@@ -234,7 +253,6 @@ def main():
                 print(f"[현재 보이는 페이지 번호들] {visible_pages}")
 
                 for idx, page_no in enumerate(visible_pages):
-                    # 첫 페이지는 이미 열려있을 수 있음
                     if not (block_index == 0 and idx == 0):
                         clicked_page = click_page_number(frame, page, page_no)
                         print(f"[페이지 클릭] {page_no} -> {clicked_page}")
