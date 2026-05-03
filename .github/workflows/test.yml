@@ -28,25 +28,6 @@ jobs:
         run: |
           python main.py
 
-      - name: Zip output
-        if: always()
-        run: |
-          python - <<'PY'
-          import os
-          import zipfile
-
-          zip_path = "output.zip"
-          folder = "output"
-
-          with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-              for root, dirs, files in os.walk(folder):
-                  for file in files:
-                      full_path = os.path.join(root, file)
-                      arcname = os.path.relpath(full_path, folder)
-                      zf.write(full_path, arcname)
-          print("Created output.zip")
-          PY
-
       - name: Send result email
         if: always()
         env:
@@ -56,42 +37,58 @@ jobs:
           python - <<'PY'
           import os
           import smtplib
-          from email.message import EmailMessage
+          from pathlib import Path
           from datetime import datetime
+          from email.message import EmailMessage
 
           gmail_user = os.environ["GMAIL_USER"]
           gmail_password = os.environ["GMAIL_APP_PASSWORD"]
 
+          summary_path = Path("output/summary.txt")
+          excel_path = Path("output/results.xlsx")
+
           now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
-          subject = f"[자동발송] 용인 신규사업자 필터형 결과 - {now}"
-          body = """깃허브 자동 수집 결과입니다.
+          if summary_path.exists():
+              summary_text = summary_path.read_text(encoding="utf-8")
+          else:
+              summary_text = "summary.txt 파일이 생성되지 않았습니다."
 
-          첨부파일:
-          - output.zip
+          body = f"""깃허브 자동 수집 결과입니다.
 
-          output.zip 안에는 보통 아래가 들어 있습니다.
-          - results.xlsx
-          - summary.txt
-          - screenshots 폴더
-          - error 파일들(있을 경우)
+          실행시각: {now}
+
+          요약:
+          {summary_text}
+
+          첨부:
+          - results.xlsx (있을 경우)
+          - summary.txt (있을 경우)
           """
 
           msg = EmailMessage()
-          msg["Subject"] = subject
+          msg["Subject"] = f"[자동발송] 용인 신규사업자 필터형 결과 - {now}"
           msg["From"] = gmail_user
           msg["To"] = gmail_user
           msg.set_content(body)
 
-          with open("output.zip", "rb") as f:
-              data = f.read()
+          if excel_path.exists():
+              with open(excel_path, "rb") as f:
+                  msg.add_attachment(
+                      f.read(),
+                      maintype="application",
+                      subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                      filename="results.xlsx"
+                  )
 
-          msg.add_attachment(
-              data,
-              maintype="application",
-              subtype="zip",
-              filename="output.zip"
-          )
+          if summary_path.exists():
+              with open(summary_path, "rb") as f:
+                  msg.add_attachment(
+                      f.read(),
+                      maintype="text",
+                      subtype="plain",
+                      filename="summary.txt"
+                  )
 
           with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
               smtp.login(gmail_user, gmail_password)
@@ -100,12 +97,13 @@ jobs:
           print("Email sent successfully")
           PY
 
-      - name: Upload artifact
+      - name: Upload minimal artifact
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: output
+          name: output-minimal
           path: |
-            output/
-            output.zip
+            output/results.xlsx
+            output/summary.txt
+            output/*.txt
           if-no-files-found: warn
