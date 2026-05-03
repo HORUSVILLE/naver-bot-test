@@ -1,5 +1,4 @@
 from pathlib import Path
-from urllib.parse import quote
 import re
 import traceback
 from openpyxl import Workbook
@@ -81,28 +80,166 @@ def click_if_exists(container, selectors, timeout=5000):
     return False
 
 
-def open_map_search(page, query: str):
-    url = f"https://map.naver.com/p/search/{quote(query)}?searchType=place"
-    page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(7000)
-    save_shot(page, f"{safe_name(query)}_01_map_loaded.png")
+def goto_naver_and_search(page, query: str):
+    page.goto("https://www.naver.com", wait_until="domcontentloaded", timeout=60000)
+    page.wait_for_timeout(3000)
+    save_shot(page, f"{safe_name(query)}_01_naver_home.png")
+
+    search_input = None
+    for sel in [
+        "input#query",
+        "input[name='query']",
+        "input[placeholder*='검색어']",
+    ]:
+        loc = page.locator(sel).first
+        try:
+            loc.wait_for(timeout=5000)
+            search_input = loc
+            break
+        except Exception:
+            continue
+
+    if not search_input:
+        raise RuntimeError("네이버 검색창을 찾지 못함")
+
+    search_input.click()
+    search_input.fill(query)
+    page.wait_for_timeout(1000)
+    search_input.press("Enter")
+
+    page.wait_for_timeout(5000)
+    save_shot(page, f"{safe_name(query)}_02_search_result.png")
 
 
-def click_new_open_on_map(page) -> bool:
-    clicked = click_if_exists(page, [
+def open_filter_on_search_result(page):
+    page.wait_for_timeout(3000)
+
+    if "search.naver.com" not in page.url:
+        return False
+
+    # 영업중 버튼 왼쪽 필터 버튼 클릭 시도
+    clicked = page.evaluate("""
+    () => {
+        const all = Array.from(document.querySelectorAll("button, a"));
+        const openState = all.find(el => (el.textContent || "").trim() === "영업중");
+        if (openState) {
+            const idx = all.indexOf(openState);
+            if (idx > 0) {
+                all[idx - 1].click();
+                return true;
+            }
+        }
+        return false;
+    }
+    """)
+    if clicked:
+        page.wait_for_timeout(2000)
+        save_shot(page, "03_filter_open_try1.png")
+        return True
+
+    # 플레이스 영역 안 첫 버튼 클릭 시도
+    clicked = page.evaluate("""
+    () => {
+        const sections = Array.from(document.querySelectorAll("section, div, article"));
+        const root = sections.find(el => (el.innerText || "").includes("플레이스"));
+        if (!root) return false;
+        const btn = root.querySelector("button");
+        if (!btn) return false;
+        btn.click();
+        return true;
+    }
+    """)
+    if clicked:
+        page.wait_for_timeout(2000)
+        save_shot(page, "03_filter_open_try2.png")
+        return True
+
+    return False
+
+
+def scroll_filter_modal_until_new_open(page, max_scroll=12):
+    """
+    플레이스 필터 모달 내부를 아래로 스크롤해서 '새로오픈'이 보이게 만든다.
+    네 캡처 기준으로 8~9번 정도 내려야 보여서 여유 있게 12번 시도.
+    """
+    for i in range(max_scroll):
+        # 이미 보이면 종료
+        try:
+            if page.locator("text=새로오픈").count() > 0:
+                return True
+        except Exception:
+            pass
+
+        # 필터 모달 내부만 스크롤
+        page.evaluate("""
+        () => {
+            const candidates = Array.from(document.querySelectorAll("div"));
+            const modal = candidates.find(el => {
+                const txt = (el.innerText || "");
+                return txt.includes("플레이스 필터") && txt.includes("결과보기");
+            });
+
+            if (!modal) return;
+
+            // 스크롤 가능한 내부 영역 찾기
+            const scrollables = Array.from(modal.querySelectorAll("*")).filter(el => {
+                const style = window.getComputedStyle(el);
+                return (style.overflowY === 'auto' || style.overflowY === 'scroll') && el.scrollHeight > el.clientHeight;
+            });
+
+            if (scrollables.length > 0) {
+                scrollables[0].scrollTop += 400;
+            } else {
+                modal.scrollTop += 400;
+            }
+        }
+        """)
+        page.wait_for_timeout(700)
+
+        save_shot(page, f"04_filter_scroll_{i+1}.png")
+
+    # 마지막 확인
+    try:
+        return page.locator("text=새로오픈").count() > 0
+    except Exception:
+        return False
+
+
+def apply_new_open_filter_on_search_result(page):
+    page.wait_for_timeout(1500)
+
+    visible = scroll_filter_modal_until_new_open(page, max_scroll=12)
+    if not visible:
+        return False
+
+    clicked_new = click_if_exists(page, [
         "text=새로오픈",
         "button:has-text('새로오픈')",
         "a:has-text('새로오픈')",
         "span:has-text('새로오픈')",
+    ], timeout=5000)
+
+    if not clicked_new:
+        return False
+
+    page.wait_for_timeout(1500)
+    save_shot(page, "05_new_open_selected.png")
+
+    clicked_result = click_if_exists(page, [
+        "button:has-text('결과보기')",
+        "text=결과보기",
     ], timeout=7000)
 
-    page.wait_for_timeout(3000)
-    save_shot(page, "02_after_new_open_click.png")
-    return clicked
+    if not clicked_result:
+        return False
+
+    page.wait_for_timeout(7000)
+    save_shot(page, "06_after_result_button.png")
+    return True
 
 
 def get_list_context(page):
-    # 현재는 page 본문에서 수집
+    # map 화면 본문에서 왼쪽 목록 컨테이너 찾기
     candidates = [
         "#_pcmap_list_scroll_container",
         "#_pcmap_list_scroll_container ul",
@@ -332,10 +469,23 @@ def run_one_query(page, query):
 
     print(f"[START] {query}")
 
-    open_map_search(page, query)
+    goto_naver_and_search(page, query)
 
-    clicked = click_new_open_on_map(page)
-    print(f"[새로오픈 클릭] {clicked}")
+    opened = open_filter_on_search_result(page)
+    print(f"[필터 열기] {opened}")
+
+    if not opened:
+        raise RuntimeError("플레이스 필터를 열지 못함")
+
+    applied = apply_new_open_filter_on_search_result(page)
+    print(f"[새로오픈 적용] {applied}")
+
+    if not applied:
+        raise RuntimeError("새로오픈 클릭 또는 결과보기 클릭 실패")
+
+    # 결과보기 후 map 화면 기다리기
+    page.wait_for_timeout(5000)
+    save_shot(page, f"{safe_name(query)}_07_map_loaded_after_result.png")
 
     ctx = get_list_context(page)
 
@@ -376,7 +526,7 @@ def run_one_query(page, query):
 
         block_index += 1
 
-    return all_rows, clicked
+    return all_rows, applied
 
 
 def main():
@@ -392,9 +542,9 @@ def main():
 
         try:
             for query in QUERIES:
-                rows, clicked = run_one_query(page, query)
+                rows, applied = run_one_query(page, query)
                 collected.extend(rows)
-                summary_rows.append((f"{query}_new_open_clicked", str(clicked)))
+                summary_rows.append((f"{query}_new_open_applied", str(applied)))
                 summary_rows.append((f"{query}_count", len(rows)))
 
         except Exception as e:
