@@ -20,13 +20,12 @@ def safe_name(text: str) -> str:
 
 
 def save_text(filename: str, content: str):
-    path = OUTPUT_DIR / filename
-    path.write_text(content, encoding="utf-8")
+    (OUTPUT_DIR / filename).write_text(content, encoding="utf-8")
 
 
-def save_shot(page, name: str):
+def save_shot(page, filename: str):
     try:
-        page.screenshot(path=str(SCREENSHOT_DIR / name), full_page=True)
+        page.screenshot(path=str(SCREENSHOT_DIR / filename), full_page=True)
     except Exception:
         pass
 
@@ -54,11 +53,9 @@ def is_noise_row(name: str, raw_text: str) -> bool:
         "영업 종료",
     ]
 
-    # 이름이 너무 짧거나 UI 문구면 제거
     if len(name.strip()) <= 1:
         return True
 
-    # 완전 숫자만/페이지 번호 비슷한 것 제거
     if re.fullmatch(r"\d+", name.strip()):
         return True
 
@@ -69,140 +66,29 @@ def is_noise_row(name: str, raw_text: str) -> bool:
     return False
 
 
-def first_working_locator(container, selectors, timeout=5000):
+def click_if_exists(container, selectors, timeout=5000):
     for sel in selectors:
         loc = container.locator(sel).first
         try:
             loc.wait_for(timeout=timeout)
-            return loc
-        except Exception:
-            continue
-    return None
-
-
-def click_if_exists(container, selectors, timeout=5000):
-    loc = first_working_locator(container, selectors, timeout=timeout)
-    if not loc:
-        return False
-    try:
-        loc.click(timeout=timeout)
-        return True
-    except Exception:
-        try:
-            loc.click(force=True, timeout=timeout)
+            try:
+                loc.click(timeout=timeout)
+            except Exception:
+                loc.click(force=True, timeout=timeout)
             return True
         except Exception:
-            return False
-
-
-def goto_naver_and_search(page, query: str):
-    page.goto("https://www.naver.com", wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(3000)
-    save_shot(page, f"{safe_name(query)}_01_naver_home.png")
-
-    search_input = first_working_locator(page, [
-        "input#query",
-        "input[name='query']",
-        "input[placeholder*='검색어']",
-    ], timeout=8000)
-
-    if not search_input:
-        raise RuntimeError("네이버 검색창을 찾지 못함")
-
-    search_input.click()
-    search_input.fill(query)
-    page.wait_for_timeout(1000)
-    search_input.press("Enter")
-
-    page.wait_for_timeout(5000)
-    save_shot(page, f"{safe_name(query)}_02_search_result.png")
-
-
-def open_filter_on_search_result(page):
-    page.wait_for_timeout(3000)
-
-    if "search.naver.com" not in page.url:
-        return False
-
-    clicked = page.evaluate("""
-    () => {
-        const bodyText = document.body.innerText || "";
-        if (!bodyText.includes("플레이스")) return false;
-
-        const all = Array.from(document.querySelectorAll("button, a"));
-        const openState = all.find(el => (el.textContent || "").trim() === "영업중");
-        if (openState) {
-            const idx = all.indexOf(openState);
-            if (idx > 0) {
-                all[idx - 1].click();
-                return true;
-            }
-        }
-        return false;
-    }
-    """)
-    if clicked:
-        page.wait_for_timeout(2000)
-        save_shot(page, "03_filter_open_try1.png")
-        return True
-
-    clicked = page.evaluate("""
-    () => {
-        const walker = Array.from(document.querySelectorAll("div, section, article"));
-        const root = walker.find(el => (el.innerText || "").includes("플레이스"));
-        if (!root) return false;
-
-        const btn = root.querySelector("button");
-        if (!btn) return false;
-        btn.click();
-        return true;
-    }
-    """)
-    if clicked:
-        page.wait_for_timeout(2000)
-        save_shot(page, "03_filter_open_try2.png")
-        return True
-
+            continue
     return False
 
 
-def apply_new_open_filter_on_search_result(page):
-    page.wait_for_timeout(1500)
-
-    clicked_new = click_if_exists(page, [
-        "text=새로오픈",
-        "button:has-text('새로오픈')",
-        "a:has-text('새로오픈')",
-        "span:has-text('새로오픈')",
-    ], timeout=5000)
-
-    if not clicked_new:
-        return False
-
-    page.wait_for_timeout(1500)
-    save_shot(page, "04_new_open_selected.png")
-
-    clicked_result = click_if_exists(page, [
-        "button:has-text('결과보기')",
-        "text=결과보기",
-    ], timeout=7000)
-
-    if not clicked_result:
-        return False
-
-    page.wait_for_timeout(6000)
-    save_shot(page, "05_after_result_button.png")
-    return True
-
-
-def goto_map_search_direct(page, query: str):
+def open_map_search(page, query: str):
     url = f"https://map.naver.com/p/search/{quote(query)}?searchType=place"
     page.goto(url, wait_until="domcontentloaded", timeout=60000)
     page.wait_for_timeout(7000)
-    save_shot(page, f"{safe_name(query)}_06_map_direct.png")
+    save_shot(page, f"{safe_name(query)}_01_map_loaded.png")
 
 
-def click_new_open_on_map(page):
+def click_new_open_on_map(page) -> bool:
     clicked = click_if_exists(page, [
         "text=새로오픈",
         "button:has-text('새로오픈')",
@@ -211,34 +97,22 @@ def click_new_open_on_map(page):
     ], timeout=7000)
 
     page.wait_for_timeout(3000)
-    save_shot(page, "07_after_map_new_open_click.png")
+    save_shot(page, "02_after_new_open_click.png")
     return clicked
 
 
-def check_new_open_applied(page) -> bool:
-    try:
-        body = normalize_text(page.locator("body").inner_text(timeout=5000))
-    except Exception:
-        return False
-
-    # 약한 확인이지만 새로오픈 텍스트가 살아있고 map 페이지면 통과
-    if "map.naver.com" in page.url and "새로오픈" in body:
-        return True
-
-    return False
-
-
 def get_list_context(page):
-    try:
-        if page.locator("#_pcmap_list_scroll_container").count() > 0:
-            return page
-    except Exception:
-        pass
+    # 현재는 page 본문에서 수집
+    candidates = [
+        "#_pcmap_list_scroll_container",
+        "#_pcmap_list_scroll_container ul",
+        "#_pcmap_list_scroll_container li",
+    ]
 
-    for frame in page.frames:
+    for sel in candidates:
         try:
-            if frame.locator("#_pcmap_list_scroll_container").count() > 0:
-                return frame
+            if page.locator(sel).count() > 0:
+                return page
         except Exception:
             continue
 
@@ -296,34 +170,52 @@ def scroll_list_to_top(ctx):
 
 def extract_cards(ctx, query, page_no):
     rows = []
-    cards = ctx.locator("#_pcmap_list_scroll_container ul > li")
-    count = cards.count()
+
+    selectors = [
+        "#_pcmap_list_scroll_container ul > li",
+        "#_pcmap_list_scroll_container li",
+    ]
+
+    cards = None
+    count = 0
+
+    for sel in selectors:
+        try:
+            candidate = ctx.locator(sel)
+            c = candidate.count()
+            if c > 0:
+                cards = candidate
+                count = c
+                break
+        except Exception:
+            continue
+
+    if not cards or count == 0:
+        return rows
 
     for i in range(count):
         card = cards.nth(i)
         try:
-            text = normalize_text(card.inner_text(timeout=2000))
+            raw = card.inner_text(timeout=2000)
         except Exception:
             continue
 
-        if not text:
+        raw = normalize_text(raw)
+        if not raw:
             continue
 
-        lines = [normalize_text(x) for x in text.split("|") if normalize_text(x)]
-        if not lines:
-            # 줄바꿈 기준 재시도
-            try:
-                raw_lines = card.inner_text(timeout=2000).splitlines()
-                lines = [normalize_text(x) for x in raw_lines if normalize_text(x)]
-            except Exception:
-                lines = []
+        try:
+            raw_lines = card.inner_text(timeout=2000).splitlines()
+            lines = [normalize_text(x) for x in raw_lines if normalize_text(x)]
+        except Exception:
+            lines = []
 
         if not lines:
             continue
 
         name = normalize_text(lines[0])
 
-        if is_noise_row(name, text):
+        if is_noise_row(name, raw):
             continue
 
         href = ""
@@ -337,9 +229,10 @@ def extract_cards(ctx, query, page_no):
             "page": page_no,
             "rank": i + 1,
             "name": name,
-            "raw_text": text,
+            "raw_text": raw,
             "href": href,
         })
+
     return rows
 
 
@@ -348,9 +241,6 @@ def get_visible_page_numbers(ctx):
         nums = ctx.evaluate("""
         () => {
             const result = [];
-            const root = document.querySelector('#_pcmap_list_scroll_container');
-            if (!root) return [1];
-
             const snapshot = document.evaluate(
                 "//*[@id='_pcmap_list_scroll_container']/following::*[(self::a or self::button) and normalize-space(text())!='']",
                 document,
@@ -379,6 +269,7 @@ def click_page_number(ctx, page, number: int):
     locator = ctx.locator(
         f"xpath=//*[@id='_pcmap_list_scroll_container']/following::*[(self::a or self::button) and normalize-space(text())='{number}'][1]"
     )
+
     try:
         locator.click(timeout=5000)
         page.wait_for_timeout(3000)
@@ -437,34 +328,17 @@ def save_excel(rows, summary_rows):
 
 def run_one_query(page, query):
     all_rows = []
+    seen = set()
 
     print(f"[START] {query}")
 
-    goto_naver_and_search(page, query)
+    open_map_search(page, query)
 
-    opened = open_filter_on_search_result(page)
-    print(f"[필터 열기] {opened}")
-
-    if opened:
-        applied = apply_new_open_filter_on_search_result(page)
-        print(f"[새로오픈 적용] {applied}")
-    else:
-        applied = False
-
-    if "map.naver.com" not in page.url:
-        goto_map_search_direct(page, query)
-        click_new_open_on_map(page)
-    else:
-        click_new_open_on_map(page)
-
-    filter_ok = check_new_open_applied(page)
-    print(f"[새로오픈 적용 확인] {filter_ok}")
-
-    save_shot(page, f"{safe_name(query)}_08_before_collect.png")
+    clicked = click_new_open_on_map(page)
+    print(f"[새로오픈 클릭] {clicked}")
 
     ctx = get_list_context(page)
 
-    seen = set()
     block_index = 0
     max_blocks = 5
 
@@ -483,8 +357,8 @@ def run_one_query(page, query):
                     continue
 
             scroll_list_to_end(ctx, page)
-            rows = extract_cards(ctx, query, page_no)
 
+            rows = extract_cards(ctx, query, page_no)
             for row in rows:
                 key = (row["query"], row["name"], row["raw_text"])
                 if key in seen:
@@ -502,7 +376,7 @@ def run_one_query(page, query):
 
         block_index += 1
 
-    return all_rows, filter_ok
+    return all_rows, clicked
 
 
 def main():
@@ -518,9 +392,9 @@ def main():
 
         try:
             for query in QUERIES:
-                rows, filter_ok = run_one_query(page, query)
+                rows, clicked = run_one_query(page, query)
                 collected.extend(rows)
-                summary_rows.append((f"{query}_new_open_applied", str(filter_ok)))
+                summary_rows.append((f"{query}_new_open_clicked", str(clicked)))
                 summary_rows.append((f"{query}_count", len(rows)))
 
         except Exception as e:
