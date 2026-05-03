@@ -2,10 +2,15 @@ from pathlib import Path
 import re
 import traceback
 from openpyxl import Workbook
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
 
 QUERIES = [
     "용인 맛집",
+    "용인 카페",
+    "용인 디저트",
+    "용인 미용실",
+    "용인 네일샵",
+    "용인 펜션",
 ]
 
 OUTPUT_DIR = Path("output")
@@ -85,7 +90,6 @@ def open_filter_on_search_result(page):
     if "search.naver.com" not in page.url:
         return False
 
-    # 1차: 영업중 왼쪽의 필터 버튼 클릭 시도
     try:
         clicked = page.evaluate("""
         () => {
@@ -103,12 +107,11 @@ def open_filter_on_search_result(page):
         """)
         if clicked:
             page.wait_for_timeout(1500)
-            save_shot(page, "03_filter_open_try1.png")
+            save_shot(page, f"{safe_name(page.title())}_03_filter_open_try1.png")
             return True
     except Exception:
         pass
 
-    # 2차: 플레이스 영역 첫 버튼 클릭
     try:
         clicked = page.evaluate("""
         () => {
@@ -123,7 +126,7 @@ def open_filter_on_search_result(page):
         """)
         if clicked:
             page.wait_for_timeout(1500)
-            save_shot(page, "03_filter_open_try2.png")
+            save_shot(page, f"{safe_name(page.title())}_03_filter_open_try2.png")
             return True
     except Exception:
         pass
@@ -194,7 +197,6 @@ def apply_new_open_filter_on_search_result(page):
     page.wait_for_timeout(1200)
     save_shot(page, "05_new_open_selected.png")
 
-    # 결과보기 클릭 시 새 탭이 열릴 수 있음
     try:
         with page.context.expect_page(timeout=12000) as new_page_info:
             clicked_result = click_if_exists(page, [
@@ -227,9 +229,6 @@ def apply_new_open_filter_on_search_result(page):
 
 
 def get_search_frame(result_page):
-    """
-    map.naver.com 결과 화면에서 왼쪽 리스트는 iframe#searchIframe 안에 존재
-    """
     iframe_loc = result_page.locator("iframe#searchIframe").first
     iframe_loc.wait_for(timeout=15000)
 
@@ -241,7 +240,6 @@ def get_search_frame(result_page):
     if not frame:
         raise RuntimeError("searchIframe content_frame 못 찾음")
 
-    frame.wait_for_load_state()
     result_page.wait_for_timeout(3000)
 
     try:
@@ -253,9 +251,6 @@ def get_search_frame(result_page):
 
 
 def detect_list_context(frame):
-    """
-    iframe 내부에서 실제 스크롤 영역 / 카드 선택자 / 페이지네이션 선택자 탐색
-    """
     scroller_selectors = [
         "div.Ryr1F",
         "div[style*='overflow-y']",
@@ -418,7 +413,6 @@ def is_probable_place_card(name: str, raw: str) -> bool:
     if name in noise:
         return False
 
-    # 카드다운 텍스트 특징
     keywords = ["리뷰", "새로오픈", "영업", "예약", "포장", "메뉴", "쿠폰"]
     if any(k in raw for k in keywords):
         return True
@@ -578,7 +572,8 @@ def run_one_query(page, query):
         raise RuntimeError("플레이스 필터를 열지 못함")
 
     result_page = apply_new_open_filter_on_search_result(page)
-    print(f"[새로오픈 적용] {result_page is not None}")
+    applied = result_page is not None
+    print(f"[새로오픈 적용] {applied}")
     if not result_page:
         raise RuntimeError("새로오픈 클릭 또는 결과보기 클릭 실패")
 
@@ -589,7 +584,10 @@ def run_one_query(page, query):
     ctx = detect_list_context(frame)
 
     try:
-        save_text("detected_selectors.txt", f"scroller={ctx['scroller']}\nitems={ctx['items']}\npager={ctx['pager']}")
+        save_text(
+            f"detected_selectors_{safe_name(query)}.txt",
+            f"scroller={ctx['scroller']}\nitems={ctx['items']}\npager={ctx['pager']}"
+        )
     except Exception:
         pass
 
@@ -639,26 +637,32 @@ def main():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page(
-            viewport={"width": 1600, "height": 1200},
-            locale="ko-KR"
-        )
 
-        try:
-            for query in QUERIES:
+        for query in QUERIES:
+            page = browser.new_page(
+                viewport={"width": 1600, "height": 1200},
+                locale="ko-KR"
+            )
+
+            try:
                 rows, applied = run_one_query(page, query)
                 collected.extend(rows)
+
+                summary_rows.append((f"{query}_status", "OK"))
                 summary_rows.append((f"{query}_new_open_applied", str(applied)))
                 summary_rows.append((f"{query}_count", len(rows)))
 
-        except Exception as e:
-            save_shot(page, "ERROR_last_screen.png")
-            save_text("error.txt", traceback.format_exc())
-            print(traceback.format_exc())
-            raise e
+            except Exception as e:
+                save_shot(page, f"ERROR_{safe_name(query)}_last_screen.png")
+                save_text(f"error_{safe_name(query)}.txt", traceback.format_exc())
+                summary_rows.append((f"{query}_status", "ERROR"))
+                summary_rows.append((f"{query}_error", str(e)))
+                print(traceback.format_exc())
 
-        finally:
-            browser.close()
+            finally:
+                page.close()
+
+        browser.close()
 
     summary_rows.append(("total_count", len(collected)))
     save_excel(collected, summary_rows)
