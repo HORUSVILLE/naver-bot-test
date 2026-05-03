@@ -117,7 +117,7 @@ def open_filter_on_search_result(page):
     if "search.naver.com" not in page.url:
         return False
 
-    # 영업중 버튼 왼쪽 필터 버튼 클릭 시도
+    # 영업중 버튼 왼쪽의 필터 버튼 클릭 시도
     clicked = page.evaluate("""
     () => {
         const all = Array.from(document.querySelectorAll("button, a"));
@@ -137,7 +137,7 @@ def open_filter_on_search_result(page):
         save_shot(page, "03_filter_open_try1.png")
         return True
 
-    # 플레이스 영역 안 첫 버튼 클릭 시도
+    # 플레이스 영역 내부 첫 버튼 클릭 시도
     clicked = page.evaluate("""
     () => {
         const sections = Array.from(document.querySelectorAll("section, div, article"));
@@ -160,17 +160,14 @@ def open_filter_on_search_result(page):
 def scroll_filter_modal_until_new_open(page, max_scroll=12):
     """
     플레이스 필터 모달 내부를 아래로 스크롤해서 '새로오픈'이 보이게 만든다.
-    네 캡처 기준으로 8~9번 정도 내려야 보여서 여유 있게 12번 시도.
     """
     for i in range(max_scroll):
-        # 이미 보이면 종료
         try:
             if page.locator("text=새로오픈").count() > 0:
                 return True
         except Exception:
             pass
 
-        # 필터 모달 내부만 스크롤
         page.evaluate("""
         () => {
             const candidates = Array.from(document.querySelectorAll("div"));
@@ -181,7 +178,6 @@ def scroll_filter_modal_until_new_open(page, max_scroll=12):
 
             if (!modal) return;
 
-            // 스크롤 가능한 내부 영역 찾기
             const scrollables = Array.from(modal.querySelectorAll("*")).filter(el => {
                 const style = window.getComputedStyle(el);
                 return (style.overflowY === 'auto' || style.overflowY === 'scroll') && el.scrollHeight > el.clientHeight;
@@ -195,10 +191,8 @@ def scroll_filter_modal_until_new_open(page, max_scroll=12):
         }
         """)
         page.wait_for_timeout(700)
-
         save_shot(page, f"04_filter_scroll_{i+1}.png")
 
-    # 마지막 확인
     try:
         return page.locator("text=새로오픈").count() > 0
     except Exception:
@@ -210,7 +204,7 @@ def apply_new_open_filter_on_search_result(page):
 
     visible = scroll_filter_modal_until_new_open(page, max_scroll=12)
     if not visible:
-        return False
+        return None
 
     clicked_new = click_if_exists(page, [
         "text=새로오픈",
@@ -220,26 +214,45 @@ def apply_new_open_filter_on_search_result(page):
     ], timeout=5000)
 
     if not clicked_new:
-        return False
+        return None
 
     page.wait_for_timeout(1500)
     save_shot(page, "05_new_open_selected.png")
 
-    clicked_result = click_if_exists(page, [
-        "button:has-text('결과보기')",
-        "text=결과보기",
-    ], timeout=7000)
+    # 핵심: 결과보기 클릭 시 새 탭이 열리면 그 새 탭을 잡는다
+    try:
+        with page.context.expect_page(timeout=10000) as new_page_info:
+            clicked_result = click_if_exists(page, [
+                "button:has-text('결과보기')",
+                "text=결과보기",
+            ], timeout=7000)
 
-    if not clicked_result:
-        return False
+        if not clicked_result:
+            return None
 
-    page.wait_for_timeout(7000)
-    save_shot(page, "06_after_result_button.png")
-    return True
+        new_page = new_page_info.value
+        new_page.wait_for_load_state()
+        new_page.wait_for_timeout(5000)
+        save_shot(new_page, "06_after_result_button_new_tab.png")
+        return new_page
+
+    except Exception:
+        # 혹시 같은 탭에서 열리는 경우 fallback
+        clicked_result = click_if_exists(page, [
+            "button:has-text('결과보기')",
+            "text=결과보기",
+        ], timeout=7000)
+
+        if not clicked_result:
+            return None
+
+        page.wait_for_load_state()
+        page.wait_for_timeout(5000)
+        save_shot(page, "06_after_result_button_same_tab.png")
+        return page
 
 
 def get_list_context(page):
-    # map 화면 본문에서 왼쪽 목록 컨테이너 찾기
     candidates = [
         "#_pcmap_list_scroll_container",
         "#_pcmap_list_scroll_container ul",
@@ -252,6 +265,14 @@ def get_list_context(page):
                 return page
         except Exception:
             continue
+
+    for frame in page.frames:
+        for sel in candidates:
+            try:
+                if frame.locator(sel).count() > 0:
+                    return frame
+            except Exception:
+                continue
 
     raise RuntimeError("목록 컨테이너(#_pcmap_list_scroll_container)를 찾지 못함")
 
@@ -477,17 +498,18 @@ def run_one_query(page, query):
     if not opened:
         raise RuntimeError("플레이스 필터를 열지 못함")
 
-    applied = apply_new_open_filter_on_search_result(page)
+    result_page = apply_new_open_filter_on_search_result(page)
+    applied = result_page is not None
     print(f"[새로오픈 적용] {applied}")
 
-    if not applied:
+    if not result_page:
         raise RuntimeError("새로오픈 클릭 또는 결과보기 클릭 실패")
 
-    # 결과보기 후 map 화면 기다리기
-    page.wait_for_timeout(5000)
-    save_shot(page, f"{safe_name(query)}_07_map_loaded_after_result.png")
+    result_page.wait_for_timeout(5000)
+    save_shot(result_page, f"{safe_name(query)}_07_map_loaded_after_result.png")
 
-    ctx = get_list_context(page)
+    ctx = get_list_context(result_page)
+    page = result_page
 
     block_index = 0
     max_blocks = 5
