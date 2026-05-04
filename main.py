@@ -1,7 +1,7 @@
 from pathlib import Path
 import re
-import traceback
 import time
+import traceback
 from openpyxl import Workbook
 from playwright.sync_api import sync_playwright
 
@@ -18,29 +18,6 @@ OUTPUT_DIR = Path("output")
 SCREENSHOT_DIR = OUTPUT_DIR / "screenshots"
 OUTPUT_DIR.mkdir(exist_ok=True)
 SCREENSHOT_DIR.mkdir(exist_ok=True)
-
-
-def safe_name(text: str) -> str:
-    return re.sub(r"[^0-9A-Za-z가-힣]+", "_", text or "").strip("_")
-
-
-def save_text(filename: str, content: str):
-    (OUTPUT_DIR / filename).write_text(content, encoding="utf-8")
-
-
-def save_shot(page_or_frame, filename: str):
-    try:
-        page_or_frame.screenshot(path=str(SCREENSHOT_DIR / filename), full_page=True)
-    except Exception:
-        pass
-
-
-def normalize_text(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "")).strip()
-
-
-def split_text_lines(text: str):
-    return [normalize_text(x) for x in re.split(r"[\r\n]+", text or "") if normalize_text(x)]
 
 
 NOISE_NAMES = {
@@ -75,7 +52,32 @@ NOISE_NAMES = {
     "혼밥",
     "혼술",
     "이국적인",
+    "플레이스",
+    "지도",
 }
+
+
+def safe_name(text: str) -> str:
+    return re.sub(r"[^0-9A-Za-z가-힣]+", "_", text or "").strip("_")
+
+
+def save_text(filename: str, content: str):
+    (OUTPUT_DIR / filename).write_text(content, encoding="utf-8")
+
+
+def save_shot(page_or_frame, filename: str):
+    try:
+        page_or_frame.screenshot(path=str(SCREENSHOT_DIR / filename), full_page=True)
+    except Exception:
+        pass
+
+
+def normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip()
+
+
+def split_text_lines(text: str):
+    return [normalize_text(x) for x in re.split(r"[\r\n]+", text or "") if normalize_text(x)]
 
 
 def extract_business_name(lines):
@@ -85,7 +87,7 @@ def extract_business_name(lines):
             continue
         if candidate in NOISE_NAMES:
             continue
-        if candidate in {"플레이스", "지도", "저장하기", "길찾기"}:
+        if candidate.startswith("place"):
             continue
         return candidate
     return lines[0] if lines else ""
@@ -160,7 +162,7 @@ def open_filter_on_search_result(page):
         """)
         if clicked:
             page.wait_for_timeout(1500)
-            save_shot(page, "03_filter_open_try1.png")
+            save_shot(page, f"{safe_name(page.title())}_03_filter_open_try1.png")
             return True
     except Exception:
         pass
@@ -179,7 +181,7 @@ def open_filter_on_search_result(page):
         """)
         if clicked:
             page.wait_for_timeout(1500)
-            save_shot(page, "03_filter_open_try2.png")
+            save_shot(page, f"{safe_name(page.title())}_03_filter_open_try2.png")
             return True
     except Exception:
         pass
@@ -187,7 +189,7 @@ def open_filter_on_search_result(page):
     return False
 
 
-def scroll_filter_modal_until_new_open(page, max_scroll=16):
+def scroll_filter_modal_until_new_open(page, query, max_scroll=14):
     for i in range(max_scroll):
         try:
             if page.locator("text=새로오픈").count() > 0:
@@ -222,7 +224,7 @@ def scroll_filter_modal_until_new_open(page, max_scroll=16):
             pass
 
         page.wait_for_timeout(700)
-        save_shot(page, f"04_filter_scroll_{i+1}.png")
+        save_shot(page, f"{safe_name(query)}_04_filter_scroll_{i+1}.png")
 
     try:
         return page.locator("text=새로오픈").count() > 0
@@ -230,40 +232,10 @@ def scroll_filter_modal_until_new_open(page, max_scroll=16):
         return False
 
 
-def wait_until_map_page_ready(result_page, timeout_ms=25000):
-    end = time.time() + timeout_ms / 1000
-
-    while time.time() < end:
-        try:
-            url = result_page.url
-            if "map.naver.com" in url:
-                return True
-        except Exception:
-            pass
-
-        try:
-            for fr in result_page.frames:
-                fr_url = fr.url or ""
-                if "pcmap.place.naver.com/place/list" in fr_url or "/place/list?" in fr_url:
-                    return True
-        except Exception:
-            pass
-
-        try:
-            if result_page.locator("iframe#searchIframe").count() > 0:
-                return True
-        except Exception:
-            pass
-
-        result_page.wait_for_timeout(500)
-
-    return False
-
-
-def apply_new_open_filter_on_search_result(page):
+def apply_new_open_filter_on_search_result(page, query):
     page.wait_for_timeout(1000)
 
-    visible = scroll_filter_modal_until_new_open(page, max_scroll=16)
+    visible = scroll_filter_modal_until_new_open(page, query, max_scroll=14)
     if not visible:
         return None
 
@@ -278,7 +250,7 @@ def apply_new_open_filter_on_search_result(page):
         return None
 
     page.wait_for_timeout(1200)
-    save_shot(page, "05_new_open_selected.png")
+    save_shot(page, f"{safe_name(query)}_05_new_open_selected.png")
 
     try:
         with page.context.expect_page(timeout=12000) as new_page_info:
@@ -293,11 +265,7 @@ def apply_new_open_filter_on_search_result(page):
         new_page = new_page_info.value
         new_page.wait_for_load_state("domcontentloaded")
         new_page.wait_for_timeout(5000)
-        save_shot(new_page, "06_after_result_button_new_tab.png")
-
-        if not wait_until_map_page_ready(new_page):
-            raise RuntimeError("결과보기 후 새 탭에서 지도 페이지/목록 iframe 준비 실패")
-
+        save_shot(new_page, f"{safe_name(query)}_06_after_result_button_new_tab.png")
         return new_page
 
     except Exception:
@@ -311,28 +279,15 @@ def apply_new_open_filter_on_search_result(page):
 
         page.wait_for_load_state("domcontentloaded")
         page.wait_for_timeout(5000)
-        save_shot(page, "06_after_result_button_same_tab.png")
-
-        if not wait_until_map_page_ready(page):
-            raise RuntimeError("결과보기 후 현재 탭에서 지도 페이지/목록 iframe 준비 실패")
-
+        save_shot(page, f"{safe_name(query)}_06_after_result_button_same_tab.png")
         return page
 
 
-def get_search_frame(result_page):
-    # 1차: frame URL 기준으로 직접 찾기
-    end = time.time() + 25
-    while time.time() < end:
-        try:
-            for fr in result_page.frames:
-                fr_url = fr.url or ""
-                if "pcmap.place.naver.com/place/list" in fr_url or "/place/list?" in fr_url:
-                    save_text("search_iframe_url.txt", fr_url)
-                    return fr
-        except Exception:
-            pass
+def get_search_frame(result_page, query):
+    deadline = time.time() + 30
+    last_error = None
 
-        # 2차: iframe element에서 content_frame 가져오기
+    while time.time() < deadline:
         try:
             iframe_loc = result_page.locator("iframe#searchIframe").first
             if iframe_loc.count() > 0:
@@ -346,16 +301,35 @@ def get_search_frame(result_page):
                     frame = handle.content_frame()
                     if frame:
                         try:
-                            save_text("search_iframe_url.txt", frame.url)
+                            save_text(f"search_iframe_url_{safe_name(query)}.txt", frame.url)
                         except Exception:
                             pass
                         return frame
-        except Exception:
-            pass
+        except Exception as e:
+            last_error = e
 
-        result_page.wait_for_timeout(500)
+        try:
+            for fr in result_page.frames:
+                fr_url = fr.url or ""
+                if "place/list" in fr_url:
+                    try:
+                        save_text(f"search_iframe_url_{safe_name(query)}.txt", fr_url)
+                    except Exception:
+                        pass
+                    return fr
+        except Exception as e:
+            last_error = e
 
-    raise RuntimeError("iframe#searchIframe 또는 place/list frame을 찾지 못함")
+        result_page.wait_for_timeout(1000)
+
+    try:
+        save_text(f"search_page_debug_{safe_name(query)}.html", result_page.content())
+    except Exception:
+        pass
+
+    if last_error:
+        raise RuntimeError(f"searchIframe content_frame 못 찾음: {last_error}")
+    raise RuntimeError("searchIframe content_frame 못 찾음")
 
 
 def detect_list_context(frame):
@@ -368,15 +342,16 @@ def detect_list_context(frame):
     ]
 
     item_selectors = [
-        "li",
+        "li:has(a)",
         "ul > li",
+        "li",
         "div.place_section",
     ]
 
     pager_selectors = [
         "div.zRM9F",
         "div[class*='zRM9F']",
-        "div[role='navigation']",
+        "div:has-text('1'):has-text('2')",
     ]
 
     found_scroller = None
@@ -644,7 +619,7 @@ def run_one_query(page, query):
     if not opened:
         raise RuntimeError("플레이스 필터를 열지 못함")
 
-    result_page = apply_new_open_filter_on_search_result(page)
+    result_page = apply_new_open_filter_on_search_result(page, query)
     applied = result_page is not None
     print(f"[새로오픈 적용] {applied}")
     if not result_page:
@@ -653,7 +628,7 @@ def run_one_query(page, query):
     result_page.wait_for_timeout(4000)
     save_shot(result_page, f"{safe_name(query)}_07_map_loaded_after_result.png")
 
-    frame = get_search_frame(result_page)
+    frame = get_search_frame(result_page, query)
     ctx = detect_list_context(frame)
 
     try:
