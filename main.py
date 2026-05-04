@@ -1,6 +1,7 @@
 from pathlib import Path
 import re
 import traceback
+import time
 from openpyxl import Workbook
 from playwright.sync_api import sync_playwright
 
@@ -20,7 +21,7 @@ SCREENSHOT_DIR.mkdir(exist_ok=True)
 
 
 def safe_name(text: str) -> str:
-    return re.sub(r"[^0-9A-Za-z가-힣]+", "_", text).strip("_")
+    return re.sub(r"[^0-9A-Za-z가-힣]+", "_", text or "").strip("_")
 
 
 def save_text(filename: str, content: str):
@@ -36,6 +37,58 @@ def save_shot(page_or_frame, filename: str):
 
 def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip()
+
+
+def split_text_lines(text: str):
+    return [normalize_text(x) for x in re.split(r"[\r\n]+", text or "") if normalize_text(x)]
+
+
+NOISE_NAMES = {
+    "결과보기",
+    "플레이스 필터",
+    "새로오픈",
+    "초기화",
+    "검색",
+    "저장",
+    "공유",
+    "리뷰많은",
+    "요즘뜨는",
+    "영업중",
+    "영업 종료",
+    "포장주문",
+    "실시간예약",
+    "쿠폰",
+    "주차",
+    "단체석",
+    "특별한메뉴",
+    "고깃집",
+    "삼겹살",
+    "사진맛집",
+    "부맛집",
+    "넓은",
+    "신선한",
+    "다양한술",
+    "분위기좋은",
+    "조용한",
+    "편한좌석",
+    "대화",
+    "혼밥",
+    "혼술",
+    "이국적인",
+}
+
+
+def extract_business_name(lines):
+    for line in lines:
+        candidate = normalize_text(line)
+        if not candidate:
+            continue
+        if candidate in NOISE_NAMES:
+            continue
+        if candidate in {"플레이스", "지도", "저장하기", "길찾기"}:
+            continue
+        return candidate
+    return lines[0] if lines else ""
 
 
 def click_if_exists(container, selectors, timeout=5000):
@@ -107,7 +160,7 @@ def open_filter_on_search_result(page):
         """)
         if clicked:
             page.wait_for_timeout(1500)
-            save_shot(page, f"{safe_name(page.title())}_03_filter_open_try1.png")
+            save_shot(page, "03_filter_open_try1.png")
             return True
     except Exception:
         pass
@@ -126,7 +179,7 @@ def open_filter_on_search_result(page):
         """)
         if clicked:
             page.wait_for_timeout(1500)
-            save_shot(page, f"{safe_name(page.title())}_03_filter_open_try2.png")
+            save_shot(page, "03_filter_open_try2.png")
             return True
     except Exception:
         pass
@@ -134,7 +187,7 @@ def open_filter_on_search_result(page):
     return False
 
 
-def scroll_filter_modal_until_new_open(page, max_scroll=14):
+def scroll_filter_modal_until_new_open(page, max_scroll=16):
     for i in range(max_scroll):
         try:
             if page.locator("text=새로오픈").count() > 0:
@@ -177,10 +230,40 @@ def scroll_filter_modal_until_new_open(page, max_scroll=14):
         return False
 
 
+def wait_until_map_page_ready(result_page, timeout_ms=25000):
+    end = time.time() + timeout_ms / 1000
+
+    while time.time() < end:
+        try:
+            url = result_page.url
+            if "map.naver.com" in url:
+                return True
+        except Exception:
+            pass
+
+        try:
+            for fr in result_page.frames:
+                fr_url = fr.url or ""
+                if "pcmap.place.naver.com/place/list" in fr_url or "/place/list?" in fr_url:
+                    return True
+        except Exception:
+            pass
+
+        try:
+            if result_page.locator("iframe#searchIframe").count() > 0:
+                return True
+        except Exception:
+            pass
+
+        result_page.wait_for_timeout(500)
+
+    return False
+
+
 def apply_new_open_filter_on_search_result(page):
     page.wait_for_timeout(1000)
 
-    visible = scroll_filter_modal_until_new_open(page, max_scroll=14)
+    visible = scroll_filter_modal_until_new_open(page, max_scroll=16)
     if not visible:
         return None
 
@@ -208,9 +291,13 @@ def apply_new_open_filter_on_search_result(page):
             return None
 
         new_page = new_page_info.value
-        new_page.wait_for_load_state()
+        new_page.wait_for_load_state("domcontentloaded")
         new_page.wait_for_timeout(5000)
         save_shot(new_page, "06_after_result_button_new_tab.png")
+
+        if not wait_until_map_page_ready(new_page):
+            raise RuntimeError("결과보기 후 새 탭에서 지도 페이지/목록 iframe 준비 실패")
+
         return new_page
 
     except Exception:
@@ -222,52 +309,74 @@ def apply_new_open_filter_on_search_result(page):
         if not clicked_result:
             return None
 
-        page.wait_for_load_state()
+        page.wait_for_load_state("domcontentloaded")
         page.wait_for_timeout(5000)
         save_shot(page, "06_after_result_button_same_tab.png")
+
+        if not wait_until_map_page_ready(page):
+            raise RuntimeError("결과보기 후 현재 탭에서 지도 페이지/목록 iframe 준비 실패")
+
         return page
 
 
 def get_search_frame(result_page):
-    iframe_loc = result_page.locator("iframe#searchIframe").first
-    iframe_loc.wait_for(timeout=15000)
+    # 1차: frame URL 기준으로 직접 찾기
+    end = time.time() + 25
+    while time.time() < end:
+        try:
+            for fr in result_page.frames:
+                fr_url = fr.url or ""
+                if "pcmap.place.naver.com/place/list" in fr_url or "/place/list?" in fr_url:
+                    save_text("search_iframe_url.txt", fr_url)
+                    return fr
+        except Exception:
+            pass
 
-    handle = iframe_loc.element_handle()
-    if not handle:
-        raise RuntimeError("searchIframe element_handle 못 찾음")
+        # 2차: iframe element에서 content_frame 가져오기
+        try:
+            iframe_loc = result_page.locator("iframe#searchIframe").first
+            if iframe_loc.count() > 0:
+                try:
+                    iframe_loc.wait_for(state="attached", timeout=1500)
+                except Exception:
+                    pass
 
-    frame = handle.content_frame()
-    if not frame:
-        raise RuntimeError("searchIframe content_frame 못 찾음")
+                handle = iframe_loc.element_handle()
+                if handle:
+                    frame = handle.content_frame()
+                    if frame:
+                        try:
+                            save_text("search_iframe_url.txt", frame.url)
+                        except Exception:
+                            pass
+                        return frame
+        except Exception:
+            pass
 
-    result_page.wait_for_timeout(3000)
+        result_page.wait_for_timeout(500)
 
-    try:
-        save_text("search_iframe_url.txt", frame.url)
-    except Exception:
-        pass
-
-    return frame
+    raise RuntimeError("iframe#searchIframe 또는 place/list frame을 찾지 못함")
 
 
 def detect_list_context(frame):
     scroller_selectors = [
+        "#_pcmap_list_scroll_container",
+        "div[id*='pcmap_list_scroll_container']",
         "div.Ryr1F",
         "div[style*='overflow-y']",
         "body",
     ]
 
     item_selectors = [
-        "li:has(a)",
-        "ul > li",
         "li",
+        "ul > li",
         "div.place_section",
     ]
 
     pager_selectors = [
         "div.zRM9F",
         "div[class*='zRM9F']",
-        "div:has-text('1'):has-text('2')",
+        "div[role='navigation']",
     ]
 
     found_scroller = None
@@ -376,41 +485,7 @@ def is_probable_place_card(name: str, raw: str) -> bool:
     if not name or len(name) <= 1:
         return False
 
-    noise = [
-        "결과보기",
-        "플레이스 필터",
-        "새로오픈",
-        "초기화",
-        "검색",
-        "저장",
-        "공유",
-        "리뷰많은",
-        "요즘뜨는",
-        "영업중",
-        "영업 종료",
-        "포장주문",
-        "실시간예약",
-        "쿠폰",
-        "주차",
-        "단체석",
-        "특별한메뉴",
-        "고깃집",
-        "삼겹살",
-        "사진맛집",
-        "부맛집",
-        "넓은",
-        "신선한",
-        "다양한술",
-        "분위기좋은",
-        "조용한",
-        "편한좌석",
-        "대화",
-        "혼밥",
-        "혼술",
-        "이국적인",
-    ]
-
-    if name in noise:
+    if name in NOISE_NAMES:
         return False
 
     keywords = ["리뷰", "새로오픈", "영업", "예약", "포장", "메뉴", "쿠폰"]
@@ -432,18 +507,16 @@ def extract_cards(ctx, query, page_no):
         card = cards.nth(i)
 
         try:
-            raw = normalize_text(card.inner_text(timeout=1500))
+            raw_multiline = card.inner_text(timeout=1500)
         except Exception:
             continue
 
-        if not raw:
-            continue
-
-        lines = [normalize_text(x) for x in raw.splitlines() if normalize_text(x)]
+        lines = split_text_lines(raw_multiline)
         if not lines:
             continue
 
-        name = lines[0]
+        name = extract_business_name(lines)
+        raw = " ".join(lines)
 
         if not is_probable_place_card(name, raw):
             continue
