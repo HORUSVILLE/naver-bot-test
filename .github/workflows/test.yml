@@ -3,7 +3,8 @@ name: Playwright Screenshot
 on:
   workflow_dispatch:
   schedule:
-    - cron: "25 23 * * *"   # 한국시간 오전 8:25
+    - cron: "30 8 * * *"
+      timezone: "Asia/Seoul"
 
 jobs:
   screenshot:
