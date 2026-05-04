@@ -1,21 +1,23 @@
-name: Playwright Screenshot
+name: Naver New-Open Bot
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "30 8 * * *"
-      timezone: "Asia/Seoul"
+    # GitHub Actions cron은 UTC 기준
+    # 한국시간 매일 오전 8:30 = UTC 전날 23:30
+    - cron: "30 23 * * *"
 
 jobs:
-  screenshot:
+  scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -26,8 +28,7 @@ jobs:
           python -m playwright install chromium --with-deps
 
       - name: Run scraper
-        run: |
-          python main.py
+        run: python main.py
 
       - name: Send result email
         if: always()
@@ -39,7 +40,7 @@ jobs:
           import os
           import smtplib
           from pathlib import Path
-          from datetime import datetime
+          from datetime import datetime, timezone, timedelta
           from email.message import EmailMessage
 
           gmail_user = os.environ["GMAIL_USER"]
@@ -48,27 +49,25 @@ jobs:
           summary_path = Path("output/summary.txt")
           excel_path = Path("output/results.xlsx")
 
-          now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+          kst = timezone(timedelta(hours=9))
+          now_kst = datetime.now(kst).strftime("%Y-%m-%d %H:%M KST")
 
           if summary_path.exists():
               summary_text = summary_path.read_text(encoding="utf-8")
           else:
-              summary_text = "summary.txt 파일이 생성되지 않았습니다."
+              summary_text = "summary.txt가 생성되지 않았습니다. 실행 중 오류가 있을 수 있습니다."
 
-          body = f"""깃허브 자동 수집 결과입니다.
+          body = f"""네이버 신규오픈 매장 자동 수집 결과
 
-          실행시각: {now}
+          실행시각: {now_kst}
 
-          요약:
           {summary_text}
 
-          첨부:
-          - results.xlsx (있을 경우)
-          - summary.txt (있을 경우)
+          첨부파일을 확인해주세요.
           """
 
           msg = EmailMessage()
-          msg["Subject"] = f"[자동발송] 용인 신규사업자 필터형 결과 - {now}"
+          msg["Subject"] = f"[자동발송] 용인 신규오픈 수집 - {now_kst}"
           msg["From"] = gmail_user
           msg["To"] = gmail_user
           msg.set_content(body)
@@ -79,7 +78,7 @@ jobs:
                       f.read(),
                       maintype="application",
                       subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                      filename="results.xlsx"
+                      filename="results.xlsx",
                   )
 
           if summary_path.exists():
@@ -88,23 +87,20 @@ jobs:
                       f.read(),
                       maintype="text",
                       subtype="plain",
-                      filename="summary.txt"
+                      filename="summary.txt",
                   )
 
           with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
               smtp.login(gmail_user, gmail_password)
               smtp.send_message(msg)
-
-          print("Email sent successfully")
+          print("이메일 발송 완료")
           PY
 
-      - name: Upload minimal artifact
+      - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
-          name: output-minimal
-          path: |
-            output/results.xlsx
-            output/summary.txt
-            output/*.txt
+          name: scrape-output
+          path: output/
           if-no-files-found: warn
+          retention-days: 14
