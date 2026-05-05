@@ -3,10 +3,8 @@ name: Naver New-Open Bot
 on:
   workflow_dispatch:
   schedule:
-    # GitHub Actions cron은 UTC 기준
-    # 한국시간 매일 오전 8:30 = UTC 전날 23:30
-    - cron: "30 23 * * *"
-
+    - cron: "30 8 * * *"
+      timezone: "Asia/Seoul"
 jobs:
   scrape:
     runs-on: ubuntu-latest
