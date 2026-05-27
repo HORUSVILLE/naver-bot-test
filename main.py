@@ -1,6 +1,6 @@
 """
 네이버 신규오픈 매장 자동 수집 봇
-- 검색어별로 네이버 지도에서 새로오픈 필터를 적용
+- 검색어별로 네이버 지도에서 새로오픈 필터를 적용 (DOM 클릭 방식)
 - 모든 페이지 끝까지 순회하며 매장 정보 수집
 - output/results.xlsx + output/summary.txt 저장
 """
@@ -33,6 +33,7 @@ QUERIES = [
 MAX_PAGES_PER_QUERY = 10        # 쿼리당 최대 페이지 수
 PAGE_WAIT_MS = 3500             # 페이지 로드 후 대기 (ms)
 IFRAME_WAIT_MS = 5500           # iframe src 변경 후 대기 (ms)
+FILTER_WAIT_MS = 4000           # 필터 클릭 후 대기 (ms)
 SCROLL_MAX_STEPS = 80           # 스크롤 최대 시도 횟수
 SCROLL_STABLE_LIMIT = 4         # 같은 높이 N번 연속 → 끝으로 판정
 
@@ -74,27 +75,79 @@ def split_lines(text: str):
 
 
 # ============================================================
-# 핵심: 검색 → 새로오픈 필터 적용된 iframe URL로 진입
+# 검색 iframe 찾기
 # ============================================================
-def get_current_list_url(page, timeout_sec=30):
-    """페이지 안의 검색결과 iframe URL 반환."""
+def get_search_frame(page, timeout_sec=30):
+    """검색결과 iframe(frame 객체) 반환."""
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         for fr in page.frames:
             url = fr.url or ""
             if "pcmap.place.naver.com" in url and "/list" in url:
-                return url
+                return fr
         page.wait_for_timeout(500)
-    raise RuntimeError("검색결과 iframe URL을 찾지 못함")
+    raise RuntimeError("검색결과 iframe을 찾지 못함")
 
 
-def add_new_open_param(url: str) -> str:
-    """URL에 새로오픈 필터 파라미터 추가. 기존 page 파라미터는 제거."""
-    url = re.sub(r"[?&]page=\d+", "", url)
-    if "keywordFilter=filterOpening" in url:
-        return url
-    sep = "&" if "?" in url else "?"
-    return f"{url}{sep}keywordFilter=filterOpening%5Etrue"
+def get_current_list_url(page, timeout_sec=30):
+    """페이지 안의 검색결과 iframe URL 반환."""
+    fr = get_search_frame(page, timeout_sec)
+    return fr.url
+
+
+# ============================================================
+# 핵심: '새로오픈' 필터를 DOM 클릭으로 적용
+# ============================================================
+def click_new_open_filter(page, frame, query):
+    """
+    iframe 내부의 '새로오픈' 필터 버튼을 직접 클릭.
+    네이버가 URL 파라미터를 자주 바꾸므로, DOM 클릭이 가장 안정적.
+    """
+    candidates = [
+        "a:has-text('새로오픈')",
+        "button:has-text('새로오픈')",
+        "span:has-text('새로오픈')",
+        "[role='button']:has-text('새로오픈')",
+    ]
+
+    clicked = False
+    for sel in candidates:
+        try:
+            loc = frame.locator(sel).first
+            if loc.count() == 0:
+                continue
+            loc.wait_for(state="visible", timeout=5000)
+            loc.scroll_into_view_if_needed(timeout=3000)
+            loc.click(timeout=5000)
+            clicked = True
+            print(f"[{query}] '새로오픈' 클릭 성공 (selector={sel})")
+            break
+        except Exception as e:
+            continue
+
+    if not clicked:
+        # 페이지 본문(iframe 바깥)에서 시도
+        for sel in candidates:
+            try:
+                loc = page.locator(sel).first
+                if loc.count() == 0:
+                    continue
+                loc.wait_for(state="visible", timeout=3000)
+                loc.click(timeout=5000)
+                clicked = True
+                print(f"[{query}] '새로오픈' 클릭 성공 (page-level, selector={sel})")
+                break
+            except Exception:
+                continue
+
+    if not clicked:
+        raise RuntimeError("'새로오픈' 필터 버튼을 찾지 못함 — 네이버 UI 변경 가능성")
+
+    page.wait_for_timeout(FILTER_WAIT_MS)
+
+    # 필터 적용 후 iframe이 갱신되므로 다시 가져옴
+    new_frame = get_search_frame(page, timeout_sec=20)
+    return new_frame
 
 
 def set_page_param(url: str, page_num: int) -> str:
@@ -115,7 +168,7 @@ def navigate_iframe_to(page, target_url: str, expect_marker: str = "", timeout_s
     while time.time() < deadline:
         for fr in page.frames:
             u = fr.url or ""
-            if "pcmap.place.naver.com" in u and "filterOpening" in u:
+            if "pcmap.place.naver.com" in u and "/list" in u:
                 if expect_marker and expect_marker not in u:
                     continue
                 return fr
@@ -124,7 +177,9 @@ def navigate_iframe_to(page, target_url: str, expect_marker: str = "", timeout_s
 
 
 def open_search_with_new_open(page, query: str):
-    """검색어 진입 → 새로오픈 적용된 frame, 베이스 URL 반환."""
+    """
+    검색어 진입 → '새로오픈' 필터 클릭 적용 → 갱신된 frame, 베이스 URL 반환.
+    """
     encoded = urllib.parse.quote(query)
     map_url = f"https://map.naver.com/p/search/{encoded}"
 
@@ -132,13 +187,19 @@ def open_search_with_new_open(page, query: str):
     page.wait_for_timeout(5000)
     save_shot(page, f"{safe_name(query)}_01_map.png")
 
-    list_url = get_current_list_url(page, timeout_sec=30)
-    target_url = add_new_open_param(list_url)
-    save_text(f"target_url_{safe_name(query)}.txt", target_url)
+    # 검색결과 iframe이 뜰 때까지 대기
+    frame = get_search_frame(page, timeout_sec=30)
+    save_shot(page, f"{safe_name(query)}_02_before_filter.png")
 
-    frame = navigate_iframe_to(page, target_url)
-    save_shot(page, f"{safe_name(query)}_02_filtered.png")
-    return frame, target_url
+    # '새로오픈' 필터 클릭으로 적용
+    frame = click_new_open_filter(page, frame, query)
+    save_shot(page, f"{safe_name(query)}_03_filtered.png")
+
+    # 필터 적용 후의 iframe URL을 base_url로 사용
+    base_url = frame.url
+    save_text(f"target_url_{safe_name(query)}.txt", base_url)
+
+    return frame, base_url
 
 
 # ============================================================
