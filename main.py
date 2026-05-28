@@ -1,13 +1,16 @@
 """
-네이버 신규오픈 매장 자동 수집 봇
+네이버 신규오픈 매장 자동 수집 봇 (GitHub Actions 호환 버전)
 - 네이버 지도(map.naver.com) 검색 → 왼쪽 리스트의 '새로오픈' 칩을 직접 클릭
-- '새로오픈' 칩이 칩 영역에 없으면 → 필터 패널을 열어 '테마 > 새로오픈' 토글 후 '결과보기' 클릭
+- 칩이 없으면 → 필터 패널을 열어 '테마 > 새로오픈' 토글 후 '결과보기' 클릭
 - 모든 페이지 끝까지 순회하며 매장 정보 수집
-- 수집 후 '새로오픈' 태그가 있는 항목만 최종 필터링(이중 안전장치)
+- '새로오픈' 태그가 있는 항목만 최종 저장(이중 안전장치)
 - output/results.xlsx + output/summary.txt 저장
+- 어떤 상황에서도 output 폴더와 summary.txt는 반드시 생성됨
 """
 from pathlib import Path
+import os
 import re
+import sys
 import time
 import urllib.parse
 import traceback
@@ -32,7 +35,10 @@ QUERIES = [
 # ============================================================
 # 동작 설정
 # ============================================================
-HEADLESS = False               # False = 브라우저 창 표시(봇 차단 회피 + 디버깅에 유리)
+# GitHub Actions(서버)에는 화면이 없으므로 반드시 True 여야 함.
+# 로컬 PC에서 눈으로 보며 디버깅할 때만 False 로 바꿀 것.
+HEADLESS = True
+
 MAX_PAGES_PER_QUERY = 10       # 쿼리당 최대 페이지 수
 PAGE_LOAD_WAIT_MS = 5000       # 페이지 진입 후 대기 (ms)
 FILTER_WAIT_MS = 4500          # 필터 적용 후 대기 (ms)
@@ -44,8 +50,12 @@ ONLY_KEEP_NEW_OPEN = True      # True = '새로오픈' 태그 있는 항목만 �
 
 OUTPUT_DIR = Path("output")
 SCREENSHOT_DIR = OUTPUT_DIR / "screenshots"
+
+# 스크립트 시작 즉시 폴더 생성 — 전체 실패해도 아티팩트 업로드 보장
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+# 빈 결과라도 일단 파일을 만들어 둠 (No files found 경고 방지)
+(OUTPUT_DIR / "summary.txt").write_text("초기화됨 — 아직 실행 전\n", encoding="utf-8")
 
 
 # ============================================================
@@ -102,7 +112,7 @@ def apply_new_open_filter(page, query):
     1차: 왼쪽 리스트의 '새로오픈' 칩(단독 버튼)을 직접 클릭
     2차: 칩이 없으면 필터 패널을 열어 '테마 > 새로오픈' 토글 후 '결과보기' 클릭
     """
-    # ---- 1차 시도: 새로오픈 칩 직접 클릭 (지도 페이지 본문 레벨) ----
+    # ---- 1차 시도: 새로오픈 칩 직접 클릭 ----
     chip_selectors = [
         "button:has-text('새로오픈')",
         "a:has-text('새로오픈')",
@@ -126,7 +136,6 @@ def apply_new_open_filter(page, query):
     # ---- 2차 시도: 필터 패널 열기 → 테마 > 새로오픈 → 결과보기 ----
     print(f"[{query}] 새로오픈 칩 직접 클릭 실패 → 필터 패널 방식 시도")
 
-    # (a) 필터 아이콘(슬라이더 모양) 클릭
     filter_icon_selectors = [
         "button[aria-label*='필터']",
         "button:has-text('필터')",
@@ -147,7 +156,6 @@ def apply_new_open_filter(page, query):
             continue
 
     if not opened:
-        # 칩 영역 맨 앞의 슬라이더 아이콘 버튼을 좌표로 추정 클릭 (fallback)
         try:
             page.locator("button").filter(has=page.locator("svg")).first.click(timeout=3000)
             page.wait_for_timeout(1500)
@@ -158,7 +166,6 @@ def apply_new_open_filter(page, query):
     if not opened:
         raise RuntimeError("필터 패널을 열지 못함 — 네이버 UI 변경 가능성")
 
-    # (b) 패널 안에서 '새로오픈' 찾기 (패널을 스크롤하며)
     new_open_clicked = False
     panel_new_open = [
         "button:has-text('새로오픈')",
@@ -166,7 +173,7 @@ def apply_new_open_filter(page, query):
         "label:has-text('새로오픈')",
         "span:has-text('새로오픈')",
     ]
-    for _ in range(6):  # 패널 스크롤하며 최대 6회 탐색
+    for _ in range(6):
         for sel in panel_new_open:
             try:
                 loc = page.locator(sel).first
@@ -180,7 +187,6 @@ def apply_new_open_filter(page, query):
                 continue
         if new_open_clicked:
             break
-        # 패널 내부 스크롤 다운
         try:
             page.mouse.wheel(0, 400)
             page.wait_for_timeout(600)
@@ -192,7 +198,6 @@ def apply_new_open_filter(page, query):
 
     page.wait_for_timeout(800)
 
-    # (c) '결과보기' 버튼 클릭
     apply_selectors = [
         "button:has-text('결과보기')",
         "a:has-text('결과보기')",
@@ -300,7 +305,6 @@ def extract_card_info(card, query, page_num, rank):
     if name in LABELS or len(name) < 2:
         return None
 
-    # '새로오픈' 태그 보유 여부 (최종 필터링용)
     is_new_open = any("새로오픈" in ln for ln in lines)
 
     category = ""
@@ -399,10 +403,9 @@ def scroll_list_to_end(page, frame):
 
 
 # ============================================================
-# 페이지 순회 (페이지 번호 버튼을 직접 클릭하는 방식)
+# 페이지 순회 (페이지 번호 버튼 직접 클릭)
 # ============================================================
 def click_page_number(frame, page_num):
-    """iframe 하단 페이지네이션에서 page_num 버튼을 클릭. 성공 시 True."""
     selectors = [
         f"a:has-text('{page_num}')",
         f"button:has-text('{page_num}')",
@@ -428,7 +431,6 @@ def collect_all_pages(page, frame, query):
     all_rows = []
     seen = set()
 
-    # 1페이지
     scroll_list_to_end(page, frame)
     save_shot(page, f"{safe_name(query)}_p1_end.png")
     rows = collect_cards(frame, query, 1)
@@ -440,15 +442,13 @@ def collect_all_pages(page, frame, query):
         all_rows.append(r)
     print(f"[{query}] p1 수집: {len(rows)}건")
 
-    # 2페이지부터: 페이지 번호 버튼 클릭
     for p in range(2, MAX_PAGES_PER_QUERY + 1):
         clicked = click_page_number(frame, p)
         if not clicked:
-            print(f"[{query}] p{p} 버튼 없음 — 마지막 페이지로 판단, 종료")
+            print(f"[{query}] p{p} 버튼 없음 — 종료")
             break
 
         page.wait_for_timeout(PAGE_CLICK_WAIT_MS)
-        # 클릭 후 frame 재취득(혹시 갱신될 경우 대비)
         try:
             frame = get_search_frame(page, timeout_sec=15)
         except Exception:
@@ -484,7 +484,6 @@ def run_one_query(page, query):
     frame = open_search_with_new_open(page, query)
     rows = collect_all_pages(page, frame, query)
 
-    # 최종 안전장치: 새로오픈 태그 있는 항목만 유지
     if ONLY_KEEP_NEW_OPEN:
         before = len(rows)
         rows = [r for r in rows if r["new_open"] == "Y"]
@@ -547,7 +546,13 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=HEADLESS,
-            args=["--lang=ko-KR", "--disable-blink-features=AutomationControlled"],
+            args=[
+                "--lang=ko-KR",
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",                  # GitHub Actions 환경 필수
+                "--disable-dev-shm-usage",       # 메모리 부족 방지
+                "--disable-gpu",
+            ],
         )
         context = browser.new_context(
             viewport={"width": 1600, "height": 1200},
@@ -574,7 +579,6 @@ def main():
             finally:
                 page.close()
 
-            # 봇 차단 회피: 검색어 사이 대기
             if idx < len(QUERIES) - 1:
                 time.sleep(BETWEEN_QUERY_SEC)
 
@@ -592,4 +596,14 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # main() 전체가 죽더라도 output/summary.txt는 남기고 정상 종료(exit 0)
+    # → 아티팩트 업로드가 항상 되도록 보장
+    try:
+        main()
+    except Exception:
+        err = traceback.format_exc()
+        print(err)
+        save_text("summary.txt", f"치명적 오류로 중단됨:\n\n{err}")
+        save_text("fatal_error.txt", err)
+        # exit code를 0으로 둬서 아티팩트 업로드 단계까지 진행
+        sys.exit(0)
