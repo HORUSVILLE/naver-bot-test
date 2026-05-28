@@ -1,104 +1,49 @@
 name: Naver New-Open Bot
 
+# 수동 실행 + (선택) 매일 자동 실행
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: "30 8 * * *"
-      timezone: "Asia/Seoul"
+  workflow_dispatch:        # Actions 탭에서 "Run workflow" 버튼으로 수동 실행
+  # 매일 한국시간 오전 9시 자동 실행하려면 아래 2줄의 주석(#)을 제거
+  # schedule:
+  #   - cron: '0 0 * * *'   # UTC 00:00 = 한국시간 09:00
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 30     # 30분 넘으면 강제 종료(무한 대기 방지)
 
     steps:
+      # 1) 저장소 코드 가져오기
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 2) 파이썬 설치
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: Install dependencies
+      # 3) 파이썬 패키지 설치
+      - name: Install Python packages
         run: |
           python -m pip install --upgrade pip
           pip install playwright openpyxl
-          python -m playwright install chromium --with-deps
 
+      # 4) Playwright 브라우저 + 시스템 의존성 설치 (이게 빠지면 무조건 실패)
+      - name: Install Playwright browser
+        run: python -m playwright install --with-deps chromium
+
+      # 5) 크롤러 실행
       - name: Run scraper
         run: python main.py
 
-      - name: Send result email
-        if: always()
-        env:
-          GMAIL_USER: ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-        run: |
-          python - <<'PY'
-          import os
-          import smtplib
-          from pathlib import Path
-          from datetime import datetime, timezone, timedelta
-          from email.message import EmailMessage
-
-          gmail_user = os.environ["GMAIL_USER"]
-          gmail_password = os.environ["GMAIL_APP_PASSWORD"]
-
-          summary_path = Path("output/summary.txt")
-          excel_path = Path("output/results.xlsx")
-
-          kst = timezone(timedelta(hours=9))
-          now_kst = datetime.now(kst).strftime("%Y-%m-%d %H:%M KST")
-
-          if summary_path.exists():
-              summary_text = summary_path.read_text(encoding="utf-8")
-          else:
-              summary_text = "summary.txt가 생성되지 않았습니다. 실행 중 오류가 있을 수 있습니다."
-
-          body = f"""네이버 신규오픈 매장 자동 수집 결과
-
-          실행시각: {now_kst}
-
-          {summary_text}
-
-          첨부파일을 확인해주세요.
-          """
-
-          msg = EmailMessage()
-          msg["Subject"] = f"[자동발송] 용인 신규오픈 수집 - {now_kst}"
-          msg["From"] = gmail_user
-          msg["To"] = gmail_user
-          msg.set_content(body)
-
-          if excel_path.exists():
-              with open(excel_path, "rb") as f:
-                  msg.add_attachment(
-                      f.read(),
-                      maintype="application",
-                      subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                      filename="results.xlsx",
-                  )
-
-          if summary_path.exists():
-              with open(summary_path, "rb") as f:
-                  msg.add_attachment(
-                      f.read(),
-                      maintype="text",
-                      subtype="plain",
-                      filename="summary.txt",
-                  )
-
-          with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-              smtp.login(gmail_user, gmail_password)
-              smtp.send_message(msg)
-          print("이메일 발송 완료")
-          PY
-
-      - name: Upload artifacts
+      # 6) 결과물(엑셀/요약/스크린샷) 업로드
+      #    if: always() → 앞 단계가 실패해도 결과 폴더는 무조건 업로드
+      - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scrape-output
+          name: naver-results
           path: output/
           if-no-files-found: warn
           retention-days: 14
