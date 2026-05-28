@@ -343,64 +343,77 @@ def scroll_list_to_end(page, frame):
 
 def extract_names_and_cards(frame, query, page_num):
     """
-    카드 단위로 순회하며 상호명(파란 큰 글씨)을 추출.
-    카드 셀렉터가 안 잡히면 상호명 셀렉터로 직접 추출(이름만이라도 확보).
+    클래스명에 의존하지 않고 '구조'로 상호명을 추출한다.
+
+    핵심 원리:
+      - 네이버 플레이스 목록의 각 매장 카드에는, 상세페이지로 가는 링크가 있다.
+        그 링크의 href는 /place/ , /restaurant/ , /hairshop/ , /accommodation/ 등
+        카테고리별로 다르지만, 공통적으로 숫자 ID가 들어간 상세 링크다.
+      - 그 '첫 번째 상세 링크의 텍스트'가 바로 파란 큰 글씨 = 상호명이다.
+      - 카테고리(맛집/미용실/네일/펜션)나 클래스명이 바뀌어도 이 구조는 동일하다.
+
+    JS로 한 번에 li 카드들을 순회하며 {상호명, 부가정보, 링크}를 뽑는다.
     """
     rows = []
+    try:
+        items = frame.evaluate(
+            r"""() => {
+                // 상세페이지로 가는 링크인지 판별 (숫자 ID가 포함된 place 계열 경로)
+                const isPlaceLink = (href) => {
+                    if (!href) return false;
+                    return /\/(place|restaurant|hairshop|nail|beauty|accommodation|hospital|cafe|attraction|place)\/\d+/.test(href)
+                        || /place\.naver\.com\/.*\/\d+/.test(href);
+                };
 
-    card_sel = find_first_existing(frame, CARD_SELECTORS)
-    if card_sel:
-        cards = frame.locator(card_sel)
-        count = cards.count()
-        rank = 0
-        for i in range(count):
-            card = cards.nth(i)
-            # 상호명: 카드 내부의 파란 글씨 후보 우선
-            name = ""
-            for nsel in NAME_SELECTORS:
-                try:
-                    loc = card.locator(nsel).first
-                    if loc.count() > 0:
-                        name = normalize(loc.inner_text(timeout=800))
-                        if name:
-                            break
-                except Exception:
-                    continue
-            if not name:
-                continue
-            # 부가정보
-            try:
-                full = normalize(card.inner_text(timeout=800))
-            except Exception:
-                full = ""
-            href = ""
-            try:
-                href = card.locator("a").first.get_attribute("href") or ""
-            except Exception:
-                pass
-            rank += 1
-            rows.append({
-                "query": query, "page": page_num, "rank": rank,
-                "name": name, "detail": full, "href": href,
-            })
-        if rows:
-            return rows
+                // 카드 후보: li 중에서 상세링크를 1개 이상 가진 것
+                const lis = Array.from(document.querySelectorAll("li"));
+                const out = [];
+                const seen = new Set();
 
-    # fallback: 카드 못 잡으면 상호명 셀렉터로 이름만 수집
-    name_sel = find_first_existing(frame, NAME_SELECTORS)
-    if name_sel:
-        loc = frame.locator(name_sel)
-        count = loc.count()
-        for i in range(count):
-            try:
-                name = normalize(loc.nth(i).inner_text(timeout=800))
-            except Exception:
-                continue
-            if name:
-                rows.append({
-                    "query": query, "page": page_num, "rank": i + 1,
-                    "name": name, "detail": "", "href": "",
-                })
+                for (const li of lis) {
+                    const anchors = Array.from(li.querySelectorAll("a"));
+                    // 카드 안의 첫 상세링크
+                    let nameLink = null;
+                    for (const a of anchors) {
+                        if (isPlaceLink(a.getAttribute("href"))) { nameLink = a; break; }
+                    }
+                    if (!nameLink) continue;
+
+                    // 상호명 = 그 링크의 텍스트 (파란 큰 글씨)
+                    let name = (nameLink.innerText || nameLink.textContent || "").trim();
+                    name = name.split("\n")[0].trim();   // 혹시 여러 줄이면 첫 줄
+                    if (!name || name.length < 2) continue;
+
+                    // 중복 카드 방지(같은 li가 중첩 매칭되는 경우)
+                    const href = nameLink.getAttribute("href") || "";
+                    const key = name + "::" + href;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+
+                    // 부가정보 = 카드 전체 텍스트(한 줄로)
+                    let detail = (li.innerText || "").replace(/\s+/g, " ").trim();
+
+                    out.push({ name, detail, href });
+                }
+                return out;
+            }"""
+        )
+    except Exception as e:
+        save_debug(f"extract_error_{safe_name(query)}_p{page_num}.txt", str(e))
+        items = []
+
+    rank = 0
+    for it in items:
+        name = normalize(it.get("name", ""))
+        if not name:
+            continue
+        rank += 1
+        rows.append({
+            "query": query, "page": page_num, "rank": rank,
+            "name": name,
+            "detail": normalize(it.get("detail", ""))[:300],
+            "href": it.get("href", ""),
+        })
     return rows
 
 
