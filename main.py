@@ -1,7 +1,9 @@
 """
 네이버 신규오픈 매장 자동 수집 봇
-- 검색어별로 네이버 지도에서 새로오픈 필터를 적용 (DOM 클릭 방식)
+- 네이버 지도(map.naver.com) 검색 → 왼쪽 리스트의 '새로오픈' 칩을 직접 클릭
+- '새로오픈' 칩이 칩 영역에 없으면 → 필터 패널을 열어 '테마 > 새로오픈' 토글 후 '결과보기' 클릭
 - 모든 페이지 끝까지 순회하며 매장 정보 수집
+- 수집 후 '새로오픈' 태그가 있는 항목만 최종 필터링(이중 안전장치)
 - output/results.xlsx + output/summary.txt 저장
 """
 from pathlib import Path
@@ -30,12 +32,15 @@ QUERIES = [
 # ============================================================
 # 동작 설정
 # ============================================================
-MAX_PAGES_PER_QUERY = 10        # 쿼리당 최대 페이지 수
-PAGE_WAIT_MS = 3500             # 페이지 로드 후 대기 (ms)
-IFRAME_WAIT_MS = 5500           # iframe src 변경 후 대기 (ms)
-FILTER_WAIT_MS = 4000           # 필터 클릭 후 대기 (ms)
-SCROLL_MAX_STEPS = 80           # 스크롤 최대 시도 횟수
-SCROLL_STABLE_LIMIT = 4         # 같은 높이 N번 연속 → 끝으로 판정
+HEADLESS = False               # False = 브라우저 창 표시(봇 차단 회피 + 디버깅에 유리)
+MAX_PAGES_PER_QUERY = 10       # 쿼리당 최대 페이지 수
+PAGE_LOAD_WAIT_MS = 5000       # 페이지 진입 후 대기 (ms)
+FILTER_WAIT_MS = 4500          # 필터 적용 후 대기 (ms)
+PAGE_CLICK_WAIT_MS = 3500      # 페이지 버튼 클릭 후 대기 (ms)
+BETWEEN_QUERY_SEC = 7          # 검색어 사이 대기 (봇 차단 회피)
+SCROLL_MAX_STEPS = 80          # 스크롤 최대 시도 횟수
+SCROLL_STABLE_LIMIT = 4        # 같은 높이 N번 연속 → 끝으로 판정
+ONLY_KEEP_NEW_OPEN = True      # True = '새로오픈' 태그 있는 항목만 최종 저장
 
 OUTPUT_DIR = Path("output")
 SCREENSHOT_DIR = OUTPUT_DIR / "screenshots"
@@ -75,10 +80,10 @@ def split_lines(text: str):
 
 
 # ============================================================
-# 검색 iframe 찾기
+# 검색결과 iframe(frame) 찾기
 # ============================================================
 def get_search_frame(page, timeout_sec=30):
-    """검색결과 iframe(frame 객체) 반환."""
+    """검색결과 리스트 iframe(frame 객체) 반환."""
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         for fr in page.frames:
@@ -89,117 +94,139 @@ def get_search_frame(page, timeout_sec=30):
     raise RuntimeError("검색결과 iframe을 찾지 못함")
 
 
-def get_current_list_url(page, timeout_sec=30):
-    """페이지 안의 검색결과 iframe URL 반환."""
-    fr = get_search_frame(page, timeout_sec)
-    return fr.url
-
-
 # ============================================================
-# 핵심: '새로오픈' 필터를 DOM 클릭으로 적용
+# '새로오픈' 필터 적용
 # ============================================================
-def click_new_open_filter(page, frame, query):
+def apply_new_open_filter(page, query):
     """
-    iframe 내부의 '새로오픈' 필터 버튼을 직접 클릭.
-    네이버가 URL 파라미터를 자주 바꾸므로, DOM 클릭이 가장 안정적.
+    1차: 왼쪽 리스트의 '새로오픈' 칩(단독 버튼)을 직접 클릭
+    2차: 칩이 없으면 필터 패널을 열어 '테마 > 새로오픈' 토글 후 '결과보기' 클릭
     """
-    candidates = [
-        "a:has-text('새로오픈')",
+    # ---- 1차 시도: 새로오픈 칩 직접 클릭 (지도 페이지 본문 레벨) ----
+    chip_selectors = [
         "button:has-text('새로오픈')",
-        "span:has-text('새로오픈')",
+        "a:has-text('새로오픈')",
         "[role='button']:has-text('새로오픈')",
+        "span:has-text('새로오픈')",
     ]
-
-    clicked = False
-    for sel in candidates:
+    for sel in chip_selectors:
         try:
-            loc = frame.locator(sel).first
+            loc = page.locator(sel).first
             if loc.count() == 0:
                 continue
-            loc.wait_for(state="visible", timeout=5000)
+            loc.wait_for(state="visible", timeout=4000)
             loc.scroll_into_view_if_needed(timeout=3000)
-            loc.click(timeout=5000)
-            clicked = True
-            print(f"[{query}] '새로오픈' 클릭 성공 (selector={sel})")
-            break
-        except Exception as e:
+            loc.click(timeout=4000)
+            page.wait_for_timeout(FILTER_WAIT_MS)
+            print(f"[{query}] '새로오픈' 칩 직접 클릭 성공 (selector={sel})")
+            return True
+        except Exception:
             continue
 
-    if not clicked:
-        # 페이지 본문(iframe 바깥)에서 시도
-        for sel in candidates:
+    # ---- 2차 시도: 필터 패널 열기 → 테마 > 새로오픈 → 결과보기 ----
+    print(f"[{query}] 새로오픈 칩 직접 클릭 실패 → 필터 패널 방식 시도")
+
+    # (a) 필터 아이콘(슬라이더 모양) 클릭
+    filter_icon_selectors = [
+        "button[aria-label*='필터']",
+        "button:has-text('필터')",
+        "a:has-text('필터')",
+        "button.btn_filter",
+    ]
+    opened = False
+    for sel in filter_icon_selectors:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() == 0:
+                continue
+            loc.click(timeout=4000)
+            page.wait_for_timeout(1500)
+            opened = True
+            break
+        except Exception:
+            continue
+
+    if not opened:
+        # 칩 영역 맨 앞의 슬라이더 아이콘 버튼을 좌표로 추정 클릭 (fallback)
+        try:
+            page.locator("button").filter(has=page.locator("svg")).first.click(timeout=3000)
+            page.wait_for_timeout(1500)
+            opened = True
+        except Exception:
+            pass
+
+    if not opened:
+        raise RuntimeError("필터 패널을 열지 못함 — 네이버 UI 변경 가능성")
+
+    # (b) 패널 안에서 '새로오픈' 찾기 (패널을 스크롤하며)
+    new_open_clicked = False
+    panel_new_open = [
+        "button:has-text('새로오픈')",
+        "a:has-text('새로오픈')",
+        "label:has-text('새로오픈')",
+        "span:has-text('새로오픈')",
+    ]
+    for _ in range(6):  # 패널 스크롤하며 최대 6회 탐색
+        for sel in panel_new_open:
             try:
                 loc = page.locator(sel).first
                 if loc.count() == 0:
                     continue
-                loc.wait_for(state="visible", timeout=3000)
-                loc.click(timeout=5000)
-                clicked = True
-                print(f"[{query}] '새로오픈' 클릭 성공 (page-level, selector={sel})")
+                loc.scroll_into_view_if_needed(timeout=2500)
+                loc.click(timeout=3000)
+                new_open_clicked = True
                 break
             except Exception:
                 continue
+        if new_open_clicked:
+            break
+        # 패널 내부 스크롤 다운
+        try:
+            page.mouse.wheel(0, 400)
+            page.wait_for_timeout(600)
+        except Exception:
+            break
 
-    if not clicked:
-        raise RuntimeError("'새로오픈' 필터 버튼을 찾지 못함 — 네이버 UI 변경 가능성")
+    if not new_open_clicked:
+        raise RuntimeError("필터 패널 내 '새로오픈' 항목을 찾지 못함")
+
+    page.wait_for_timeout(800)
+
+    # (c) '결과보기' 버튼 클릭
+    apply_selectors = [
+        "button:has-text('결과보기')",
+        "a:has-text('결과보기')",
+        "button:has-text('적용')",
+    ]
+    for sel in apply_selectors:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() == 0:
+                continue
+            loc.click(timeout=3000)
+            break
+        except Exception:
+            continue
 
     page.wait_for_timeout(FILTER_WAIT_MS)
-
-    # 필터 적용 후 iframe이 갱신되므로 다시 가져옴
-    new_frame = get_search_frame(page, timeout_sec=20)
-    return new_frame
-
-
-def set_page_param(url: str, page_num: int) -> str:
-    url = re.sub(r"[?&]page=\d+", "", url)
-    sep = "&" if "?" in url else "?"
-    return f"{url}{sep}page={page_num}"
-
-
-def navigate_iframe_to(page, target_url: str, expect_marker: str = "", timeout_sec=30):
-    """iframe#searchIframe의 src를 target_url로 변경하고, 갱신된 frame 반환."""
-    page.evaluate(
-        "(u) => { const f = document.querySelector('iframe#searchIframe'); if (f) f.src = u; }",
-        target_url,
-    )
-    page.wait_for_timeout(IFRAME_WAIT_MS)
-
-    deadline = time.time() + timeout_sec
-    while time.time() < deadline:
-        for fr in page.frames:
-            u = fr.url or ""
-            if "pcmap.place.naver.com" in u and "/list" in u:
-                if expect_marker and expect_marker not in u:
-                    continue
-                return fr
-        page.wait_for_timeout(500)
-    raise RuntimeError(f"iframe 이동 실패 (marker={expect_marker})")
+    print(f"[{query}] 필터 패널 방식으로 '새로오픈' 적용 완료")
+    return True
 
 
 def open_search_with_new_open(page, query: str):
-    """
-    검색어 진입 → '새로오픈' 필터 클릭 적용 → 갱신된 frame, 베이스 URL 반환.
-    """
+    """검색어 진입 → '새로오픈' 필터 적용 → 검색 frame 반환."""
     encoded = urllib.parse.quote(query)
-    map_url = f"https://map.naver.com/p/search/{encoded}"
+    map_url = f"https://map.naver.com/p/search/{encoded}?searchType=place"
 
     page.goto(map_url, wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(5000)
+    page.wait_for_timeout(PAGE_LOAD_WAIT_MS)
     save_shot(page, f"{safe_name(query)}_01_map.png")
 
-    # 검색결과 iframe이 뜰 때까지 대기
+    apply_new_open_filter(page, query)
+    save_shot(page, f"{safe_name(query)}_02_filtered.png")
+
     frame = get_search_frame(page, timeout_sec=30)
-    save_shot(page, f"{safe_name(query)}_02_before_filter.png")
-
-    # '새로오픈' 필터 클릭으로 적용
-    frame = click_new_open_filter(page, frame, query)
-    save_shot(page, f"{safe_name(query)}_03_filtered.png")
-
-    # 필터 적용 후의 iframe URL을 base_url로 사용
-    base_url = frame.url
-    save_text(f"target_url_{safe_name(query)}.txt", base_url)
-
-    return frame, base_url
+    return frame
 
 
 # ============================================================
@@ -218,19 +245,18 @@ CARD_SELECTORS = [
     "li.VLTHu",
 ]
 
-# 라벨 텍스트(이름이 아님)
 LABELS = {
     "새로오픈", "예약", "주문", "톡톡", "쿠폰", "포장", "광고",
     "영업 종료", "영업종료", "영업중", "영업 중", "place+", "Npay+", "Npay",
     "단체석", "주차", "리뷰많은", "요즘뜨는", "신선한", "분위기좋은",
 }
 
-# 카테고리 힌트
 CATEGORY_HINTS = {
     "카페", "디저트", "음식점", "한식", "중식", "양식", "일식", "분식",
     "이자카야", "베이커리", "피자", "치킨", "고기", "국밥", "라면",
     "미용실", "네일", "마사지", "에스테틱", "헤어", "바버샵",
     "펜션", "숙박", "호텔", "모텔", "게스트하우스", "리조트", "풀빌라",
+    "주꾸미요리", "백숙", "삼계탕", "중식당",
 }
 
 
@@ -274,6 +300,9 @@ def extract_card_info(card, query, page_num, rank):
     if name in LABELS or len(name) < 2:
         return None
 
+    # '새로오픈' 태그 보유 여부 (최종 필터링용)
+    is_new_open = any("새로오픈" in ln for ln in lines)
+
     category = ""
     address = ""
     review = ""
@@ -307,6 +336,7 @@ def extract_card_info(card, query, page_num, rank):
         "category": category,
         "address": address,
         "review": review,
+        "new_open": "Y" if is_new_open else "",
         "extras": " | ".join(extras[:5]),
         "href": href,
         "raw": " / ".join(lines),
@@ -368,30 +398,33 @@ def scroll_list_to_end(page, frame):
             break
 
 
-def get_max_page_number(frame) -> int:
-    try:
-        return frame.evaluate(
-            r"""() => {
-                const els = Array.from(document.querySelectorAll("a, button, span"));
-                let mx = 1;
-                for (const el of els) {
-                    const t = (el.textContent || "").trim();
-                    if (/^\d+$/.test(t)) {
-                        const n = Number(t);
-                        if (n > mx && n <= 50) mx = n;
-                    }
-                }
-                return mx;
-            }"""
-        )
-    except Exception:
-        return 1
+# ============================================================
+# 페이지 순회 (페이지 번호 버튼을 직접 클릭하는 방식)
+# ============================================================
+def click_page_number(frame, page_num):
+    """iframe 하단 페이지네이션에서 page_num 버튼을 클릭. 성공 시 True."""
+    selectors = [
+        f"a:has-text('{page_num}')",
+        f"button:has-text('{page_num}')",
+        f"span:has-text('{page_num}')",
+    ]
+    for sel in selectors:
+        try:
+            loc = frame.locator(sel)
+            n = loc.count()
+            for i in range(n):
+                el = loc.nth(i)
+                txt = (el.inner_text(timeout=1000) or "").strip()
+                if txt == str(page_num):
+                    el.scroll_into_view_if_needed(timeout=2000)
+                    el.click(timeout=3000)
+                    return True
+        except Exception:
+            continue
+    return False
 
 
-# ============================================================
-# 페이지 순회
-# ============================================================
-def collect_all_pages(page, frame, base_url, query):
+def collect_all_pages(page, frame, query):
     all_rows = []
     seen = set()
 
@@ -405,28 +438,28 @@ def collect_all_pages(page, frame, base_url, query):
             continue
         seen.add(key)
         all_rows.append(r)
+    print(f"[{query}] p1 수집: {len(rows)}건")
 
-    max_page = get_max_page_number(frame)
-    print(f"[{query}] p1 수집: {len(rows)}건, 추정 최대 페이지: {max_page}")
-
-    if max_page <= 1:
-        return all_rows
-
-    target_max = min(max_page, MAX_PAGES_PER_QUERY)
-    for p in range(2, target_max + 1):
-        page_url = set_page_param(base_url, p)
-        try:
-            frame = navigate_iframe_to(page, page_url, expect_marker=f"page={p}")
-        except Exception as e:
-            print(f"[{query}] p{p} 이동 실패: {e}")
+    # 2페이지부터: 페이지 번호 버튼 클릭
+    for p in range(2, MAX_PAGES_PER_QUERY + 1):
+        clicked = click_page_number(frame, p)
+        if not clicked:
+            print(f"[{query}] p{p} 버튼 없음 — 마지막 페이지로 판단, 종료")
             break
+
+        page.wait_for_timeout(PAGE_CLICK_WAIT_MS)
+        # 클릭 후 frame 재취득(혹시 갱신될 경우 대비)
+        try:
+            frame = get_search_frame(page, timeout_sec=15)
+        except Exception:
+            pass
 
         scroll_list_to_end(page, frame)
         save_shot(page, f"{safe_name(query)}_p{p}_end.png")
 
         rows = collect_cards(frame, query, p)
         if not rows:
-            print(f"[{query}] p{p} 카드 없음 — 중단")
+            print(f"[{query}] p{p} 카드 없음 — 종료")
             break
 
         added = 0
@@ -440,6 +473,7 @@ def collect_all_pages(page, frame, base_url, query):
 
         print(f"[{query}] p{p} 추가: {added}건 (누적 {len(all_rows)})")
         if added == 0:
+            print(f"[{query}] p{p} 신규 없음 — 종료")
             break
 
     return all_rows
@@ -447,8 +481,15 @@ def collect_all_pages(page, frame, base_url, query):
 
 def run_one_query(page, query):
     print(f"\n{'='*50}\n[START] {query}\n{'='*50}")
-    frame, base_url = open_search_with_new_open(page, query)
-    rows = collect_all_pages(page, frame, base_url, query)
+    frame = open_search_with_new_open(page, query)
+    rows = collect_all_pages(page, frame, query)
+
+    # 최종 안전장치: 새로오픈 태그 있는 항목만 유지
+    if ONLY_KEEP_NEW_OPEN:
+        before = len(rows)
+        rows = [r for r in rows if r["new_open"] == "Y"]
+        print(f"[{query}] 새로오픈 필터링: {before}건 → {len(rows)}건")
+
     print(f"[DONE] {query}: 총 {len(rows)}건")
     return rows
 
@@ -462,7 +503,7 @@ def save_excel(all_rows, summary_data):
     ws.title = "Results"
 
     headers = ["검색어", "페이지", "순위", "상호명", "카테고리", "주소",
-               "리뷰", "참고사항", "링크", "원본텍스트"]
+               "리뷰", "새로오픈", "참고사항", "링크", "원본텍스트"]
     ws.append(headers)
     header_fill = PatternFill("solid", start_color="305496")
     for cell in ws[1]:
@@ -474,10 +515,10 @@ def save_excel(all_rows, summary_data):
         ws.append([
             r["query"], r["page"], r["rank"],
             r["name"], r["category"], r["address"],
-            r["review"], r["extras"], r["href"], r["raw"],
+            r["review"], r["new_open"], r["extras"], r["href"], r["raw"],
         ])
 
-    widths = [12, 6, 6, 30, 18, 40, 14, 35, 50, 60]
+    widths = [12, 6, 6, 30, 18, 40, 14, 8, 35, 50, 60]
     for i, w in enumerate(widths, 1):
         col = ws.cell(row=1, column=i).column_letter
         ws.column_dimensions[col].width = w
@@ -486,9 +527,8 @@ def save_excel(all_rows, summary_data):
     ws2 = wb.create_sheet("Summary")
     ws2.append(["항목", "값"])
     for cell in ws2[1]:
-        cell.font = Font(bold=True, name="맑은 고딕")
-        cell.fill = header_fill
         cell.font = Font(bold=True, color="FFFFFF", name="맑은 고딕")
+        cell.fill = header_fill
     for k, v in summary_data:
         ws2.append([k, str(v)])
     ws2.column_dimensions["A"].width = 32
@@ -506,7 +546,7 @@ def main():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
-            headless=True,
+            headless=HEADLESS,
             args=["--lang=ko-KR", "--disable-blink-features=AutomationControlled"],
         )
         context = browser.new_context(
@@ -519,7 +559,7 @@ def main():
             ),
         )
 
-        for query in QUERIES:
+        for idx, query in enumerate(QUERIES):
             page = context.new_page()
             try:
                 rows = run_one_query(page, query)
@@ -533,6 +573,10 @@ def main():
                 print(traceback.format_exc())
             finally:
                 page.close()
+
+            # 봇 차단 회피: 검색어 사이 대기
+            if idx < len(QUERIES) - 1:
+                time.sleep(BETWEEN_QUERY_SEC)
 
         browser.close()
 
