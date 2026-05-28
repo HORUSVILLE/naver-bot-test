@@ -1,11 +1,10 @@
 """
-네이버 신규오픈 매장 자동 수집 봇 (GitHub Actions 호환 버전)
-- 네이버 지도(map.naver.com) 검색 → 왼쪽 리스트의 '새로오픈' 칩을 직접 클릭
-- 칩이 없으면 → 필터 패널을 열어 '테마 > 새로오픈' 토글 후 '결과보기' 클릭
-- 모든 페이지 끝까지 순회하며 매장 정보 수집
-- '새로오픈' 태그가 있는 항목만 최종 저장(이중 안전장치)
-- output/results.xlsx + output/summary.txt 저장
-- 어떤 상황에서도 output 폴더와 summary.txt는 반드시 생성됨
+네이버 신규오픈 매장 자동 수집 봇 (GitHub Actions 호환 + 디버그 강화 버전)
+- 네이버 지도(map.naver.com) 검색 → '새로오픈' 필터 적용
+- 필터 적용을 3단계로 시도(칩 직접 클릭 → 패널 토글 → JS 강제 클릭)
+- 실패 시 화면의 모든 버튼 텍스트와 HTML을 output에 저장(다음 진단용)
+- '새로오픈' 태그가 있는 항목만 최종 저장
+- 어떤 상황에서도 output 폴더 / summary.txt 는 반드시 생성됨
 """
 from pathlib import Path
 import os
@@ -35,26 +34,27 @@ QUERIES = [
 # ============================================================
 # 동작 설정
 # ============================================================
-# GitHub Actions(서버)에는 화면이 없으므로 반드시 True 여야 함.
-# 로컬 PC에서 눈으로 보며 디버깅할 때만 False 로 바꿀 것.
-HEADLESS = True
+HEADLESS = True                # GitHub Actions에서는 반드시 True
 
-MAX_PAGES_PER_QUERY = 10       # 쿼리당 최대 페이지 수
-PAGE_LOAD_WAIT_MS = 5000       # 페이지 진입 후 대기 (ms)
-FILTER_WAIT_MS = 4500          # 필터 적용 후 대기 (ms)
-PAGE_CLICK_WAIT_MS = 3500      # 페이지 버튼 클릭 후 대기 (ms)
-BETWEEN_QUERY_SEC = 7          # 검색어 사이 대기 (봇 차단 회피)
-SCROLL_MAX_STEPS = 80          # 스크롤 최대 시도 횟수
-SCROLL_STABLE_LIMIT = 4        # 같은 높이 N번 연속 → 끝으로 판정
-ONLY_KEEP_NEW_OPEN = True      # True = '새로오픈' 태그 있는 항목만 최종 저장
+MAX_PAGES_PER_QUERY = 10
+PAGE_LOAD_WAIT_MS = 6000        # 페이지 진입 후 대기 (넉넉히)
+FILTER_WAIT_MS = 4500
+PAGE_CLICK_WAIT_MS = 3500
+BETWEEN_QUERY_SEC = 7
+SCROLL_MAX_STEPS = 80
+SCROLL_STABLE_LIMIT = 4
+ONLY_KEEP_NEW_OPEN = True
+
+# 첫 검색어 실패 시 디버그 덤프를 남길지 (HTML + 버튼 텍스트)
+DUMP_DEBUG_ON_FAIL = True
 
 OUTPUT_DIR = Path("output")
 SCREENSHOT_DIR = OUTPUT_DIR / "screenshots"
+DEBUG_DIR = OUTPUT_DIR / "debug"
 
-# 스크립트 시작 즉시 폴더 생성 — 전체 실패해도 아티팩트 업로드 보장
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
-# 빈 결과라도 일단 파일을 만들어 둠 (No files found 경고 방지)
+DEBUG_DIR.mkdir(parents=True, exist_ok=True)
 (OUTPUT_DIR / "summary.txt").write_text("초기화됨 — 아직 실행 전\n", encoding="utf-8")
 
 
@@ -79,6 +79,13 @@ def save_text(filename: str, content: str):
         pass
 
 
+def save_debug(filename: str, content: str):
+    try:
+        (DEBUG_DIR / filename).write_text(content, encoding="utf-8")
+    except Exception:
+        pass
+
+
 def normalize(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
 
@@ -90,10 +97,42 @@ def split_lines(text: str):
 
 
 # ============================================================
+# 진단 덤프 — 화면의 클릭 가능한 요소 텍스트 전부 기록
+# ============================================================
+def dump_clickable_texts(page, query, tag):
+    """페이지의 button/a/[role=button] 텍스트를 모아 파일로 저장."""
+    try:
+        texts = page.evaluate(
+            """() => {
+                const out = [];
+                const els = document.querySelectorAll("button, a, [role='button'], span");
+                for (const el of els) {
+                    const t = (el.innerText || el.textContent || '').trim();
+                    if (t && t.length <= 30) out.push(t);
+                }
+                return Array.from(new Set(out));
+            }"""
+        )
+        save_debug(
+            f"clickable_{safe_name(query)}_{tag}.txt",
+            "\n".join(texts),
+        )
+    except Exception as e:
+        save_debug(f"clickable_{safe_name(query)}_{tag}_ERROR.txt", str(e))
+
+
+def dump_html(page, query, tag):
+    try:
+        html = page.content()[:200000]
+        save_debug(f"html_{safe_name(query)}_{tag}.html", html)
+    except Exception:
+        pass
+
+
+# ============================================================
 # 검색결과 iframe(frame) 찾기
 # ============================================================
 def get_search_frame(page, timeout_sec=30):
-    """검색결과 리스트 iframe(frame 객체) 반환."""
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         for fr in page.frames:
@@ -105,127 +144,148 @@ def get_search_frame(page, timeout_sec=30):
 
 
 # ============================================================
-# '새로오픈' 필터 적용
+# '새로오픈' 필터 적용 (3단계 시도)
 # ============================================================
+def try_click_text(scope, text, exact=False, timeout=3500):
+    """scope(page 또는 frame) 안에서 text를 가진 클릭요소를 시도."""
+    patterns = [
+        f"button:has-text('{text}')",
+        f"a:has-text('{text}')",
+        f"[role='button']:has-text('{text}')",
+        f"label:has-text('{text}')",
+        f"span:has-text('{text}')",
+    ]
+    for sel in patterns:
+        try:
+            loc = scope.locator(sel)
+            n = loc.count()
+            for i in range(min(n, 5)):
+                el = loc.nth(i)
+                if exact:
+                    t = (el.inner_text(timeout=1000) or "").strip()
+                    if t != text:
+                        continue
+                el.scroll_into_view_if_needed(timeout=2000)
+                el.click(timeout=timeout)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def js_force_click(page, text):
+    """JS로 해당 텍스트를 가진 요소를 강제 클릭 (CSS 셀렉터가 안 먹을 때)."""
+    try:
+        return page.evaluate(
+            """(label) => {
+                const els = Array.from(document.querySelectorAll("button, a, [role='button'], span, label"));
+                for (const el of els) {
+                    const t = (el.innerText || el.textContent || '').trim();
+                    if (t === label || t.startsWith(label)) {
+                        el.click();
+                        return true;
+                    }
+                }
+                return false;
+            }""",
+            text,
+        )
+    except Exception:
+        return False
+
+
 def apply_new_open_filter(page, query):
     """
-    1차: 왼쪽 리스트의 '새로오픈' 칩(단독 버튼)을 직접 클릭
-    2차: 칩이 없으면 필터 패널을 열어 '테마 > 새로오픈' 토글 후 '결과보기' 클릭
+    1단계: '새로오픈' 칩/버튼을 페이지에서 바로 클릭
+    2단계: 필터 패널을 열고 → 패널 내부를 스크롤하며 '새로오픈' 토글 → '결과보기'
+    3단계: JS 강제 클릭
     """
-    # ---- 1차 시도: 새로오픈 칩 직접 클릭 ----
-    chip_selectors = [
-        "button:has-text('새로오픈')",
-        "a:has-text('새로오픈')",
-        "[role='button']:has-text('새로오픈')",
-        "span:has-text('새로오픈')",
-    ]
-    for sel in chip_selectors:
-        try:
-            loc = page.locator(sel).first
-            if loc.count() == 0:
-                continue
-            loc.wait_for(state="visible", timeout=4000)
-            loc.scroll_into_view_if_needed(timeout=3000)
-            loc.click(timeout=4000)
-            page.wait_for_timeout(FILTER_WAIT_MS)
-            print(f"[{query}] '새로오픈' 칩 직접 클릭 성공 (selector={sel})")
-            return True
-        except Exception:
-            continue
+    page.wait_for_timeout(1500)
 
-    # ---- 2차 시도: 필터 패널 열기 → 테마 > 새로오픈 → 결과보기 ----
-    print(f"[{query}] 새로오픈 칩 직접 클릭 실패 → 필터 패널 방식 시도")
+    # ---- 1단계: 바로 클릭 ----
+    if try_click_text(page, "새로오픈"):
+        page.wait_for_timeout(FILTER_WAIT_MS)
+        print(f"[{query}] 1단계: '새로오픈' 직접 클릭 성공")
+        return True
 
-    filter_icon_selectors = [
-        "button[aria-label*='필터']",
-        "button:has-text('필터')",
-        "a:has-text('필터')",
-        "button.btn_filter",
-    ]
-    opened = False
-    for sel in filter_icon_selectors:
-        try:
-            loc = page.locator(sel).first
-            if loc.count() == 0:
-                continue
-            loc.click(timeout=4000)
-            page.wait_for_timeout(1500)
-            opened = True
-            break
-        except Exception:
-            continue
+    # ---- 2단계: 필터 패널 경로 ----
+    print(f"[{query}] 1단계 실패 → 2단계(필터 패널) 시도")
 
-    if not opened:
-        try:
-            page.locator("button").filter(has=page.locator("svg")).first.click(timeout=3000)
-            page.wait_for_timeout(1500)
-            opened = True
-        except Exception:
-            pass
+    # 필터 패널 열기: '필터' 텍스트 or aria-label
+    opened = (
+        try_click_text(page, "필터")
+        or _click_filter_icon(page)
+    )
+    page.wait_for_timeout(1500)
 
-    if not opened:
-        raise RuntimeError("필터 패널을 열지 못함 — 네이버 UI 변경 가능성")
-
-    new_open_clicked = False
-    panel_new_open = [
-        "button:has-text('새로오픈')",
-        "a:has-text('새로오픈')",
-        "label:has-text('새로오픈')",
-        "span:has-text('새로오픈')",
-    ]
-    for _ in range(6):
-        for sel in panel_new_open:
+    if opened:
+        # 패널 내부를 단계적으로 스크롤하며 '새로오픈' 탐색
+        for step in range(8):
+            if try_click_text(page, "새로오픈"):
+                page.wait_for_timeout(800)
+                # 결과보기 클릭
+                if not (try_click_text(page, "결과보기") or try_click_text(page, "적용")):
+                    js_force_click(page, "결과보기")
+                page.wait_for_timeout(FILTER_WAIT_MS)
+                print(f"[{query}] 2단계: 패널에서 '새로오픈' 적용 성공 (scroll step={step})")
+                return True
+            # 패널 영역으로 추정되는 곳에 마우스를 올리고 스크롤
             try:
-                loc = page.locator(sel).first
-                if loc.count() == 0:
-                    continue
-                loc.scroll_into_view_if_needed(timeout=2500)
-                loc.click(timeout=3000)
-                new_open_clicked = True
-                break
+                page.mouse.move(640, 600)
+                page.mouse.wheel(0, 350)
+                page.wait_for_timeout(500)
             except Exception:
-                continue
-        if new_open_clicked:
-            break
-        try:
-            page.mouse.wheel(0, 400)
-            page.wait_for_timeout(600)
-        except Exception:
-            break
+                break
 
-    if not new_open_clicked:
-        raise RuntimeError("필터 패널 내 '새로오픈' 항목을 찾지 못함")
+    # ---- 3단계: JS 강제 클릭 ----
+    print(f"[{query}] 2단계 실패 → 3단계(JS 강제 클릭) 시도")
+    if js_force_click(page, "새로오픈"):
+        page.wait_for_timeout(1200)
+        if not js_force_click(page, "결과보기"):
+            try_click_text(page, "결과보기")
+        page.wait_for_timeout(FILTER_WAIT_MS)
+        print(f"[{query}] 3단계: JS 강제 클릭 성공")
+        return True
 
-    page.wait_for_timeout(800)
+    # ---- 전부 실패 → 진단 정보 덤프 ----
+    if DUMP_DEBUG_ON_FAIL:
+        dump_clickable_texts(page, query, "fail")
+        dump_html(page, query, "fail")
+        save_shot(page, f"{safe_name(query)}_FAIL_filter.png")
 
-    apply_selectors = [
-        "button:has-text('결과보기')",
-        "a:has-text('결과보기')",
-        "button:has-text('적용')",
+    raise RuntimeError("'새로오픈' 필터를 적용하지 못함 (3단계 모두 실패)")
+
+
+def _click_filter_icon(page):
+    """슬라이더 모양 필터 아이콘을 여러 방법으로 클릭 시도."""
+    selectors = [
+        "button[aria-label*='필터']",
+        "button[class*='filter']",
+        "a[class*='filter']",
+        "button[class*='Filter']",
     ]
-    for sel in apply_selectors:
+    for sel in selectors:
         try:
             loc = page.locator(sel).first
-            if loc.count() == 0:
-                continue
-            loc.click(timeout=3000)
-            break
+            if loc.count() > 0:
+                loc.click(timeout=3000)
+                return True
         except Exception:
             continue
-
-    page.wait_for_timeout(FILTER_WAIT_MS)
-    print(f"[{query}] 필터 패널 방식으로 '새로오픈' 적용 완료")
-    return True
+    return False
 
 
 def open_search_with_new_open(page, query: str):
-    """검색어 진입 → '새로오픈' 필터 적용 → 검색 frame 반환."""
     encoded = urllib.parse.quote(query)
     map_url = f"https://map.naver.com/p/search/{encoded}?searchType=place"
 
     page.goto(map_url, wait_until="domcontentloaded", timeout=60000)
     page.wait_for_timeout(PAGE_LOAD_WAIT_MS)
     save_shot(page, f"{safe_name(query)}_01_map.png")
+
+    # 첫 검색어는 진단을 위해 클릭가능 요소 텍스트를 항상 덤프
+    if DUMP_DEBUG_ON_FAIL and query == QUERIES[0]:
+        dump_clickable_texts(page, query, "initial")
 
     apply_new_open_filter(page, query)
     save_shot(page, f"{safe_name(query)}_02_filtered.png")
@@ -350,10 +410,6 @@ def extract_card_info(card, query, page_num, rank):
 def collect_cards(frame, query, page_num):
     card_sel = find_first_existing(frame, CARD_SELECTORS)
     if not card_sel:
-        save_text(
-            f"no_cards_{safe_name(query)}_p{page_num}.html",
-            (frame.content() if hasattr(frame, "content") else "")[:50000],
-        )
         return []
 
     cards = frame.locator(card_sel)
@@ -403,7 +459,7 @@ def scroll_list_to_end(page, frame):
 
 
 # ============================================================
-# 페이지 순회 (페이지 번호 버튼 직접 클릭)
+# 페이지 순회
 # ============================================================
 def click_page_number(frame, page_num):
     selectors = [
@@ -443,8 +499,7 @@ def collect_all_pages(page, frame, query):
     print(f"[{query}] p1 수집: {len(rows)}건")
 
     for p in range(2, MAX_PAGES_PER_QUERY + 1):
-        clicked = click_page_number(frame, p)
-        if not clicked:
+        if not click_page_number(frame, p):
             print(f"[{query}] p{p} 버튼 없음 — 종료")
             break
 
@@ -473,7 +528,6 @@ def collect_all_pages(page, frame, query):
 
         print(f"[{query}] p{p} 추가: {added}건 (누적 {len(all_rows)})")
         if added == 0:
-            print(f"[{query}] p{p} 신규 없음 — 종료")
             break
 
     return all_rows
@@ -549,8 +603,8 @@ def main():
             args=[
                 "--lang=ko-KR",
                 "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",                  # GitHub Actions 환경 필수
-                "--disable-dev-shm-usage",       # 메모리 부족 방지
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
                 "--disable-gpu",
             ],
         )
@@ -596,8 +650,6 @@ def main():
 
 
 if __name__ == "__main__":
-    # main() 전체가 죽더라도 output/summary.txt는 남기고 정상 종료(exit 0)
-    # → 아티팩트 업로드가 항상 되도록 보장
     try:
         main()
     except Exception:
@@ -605,5 +657,4 @@ if __name__ == "__main__":
         print(err)
         save_text("summary.txt", f"치명적 오류로 중단됨:\n\n{err}")
         save_text("fatal_error.txt", err)
-        # exit code를 0으로 둬서 아티팩트 업로드 단계까지 진행
         sys.exit(0)
