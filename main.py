@@ -343,56 +343,102 @@ def scroll_list_to_end(page, frame):
 
 def extract_names_and_cards(frame, query, page_num):
     """
-    클래스명에 의존하지 않고 '구조'로 상호명을 추출한다.
-
-    핵심 원리:
-      - 네이버 플레이스 목록의 각 매장 카드에는, 상세페이지로 가는 링크가 있다.
-        그 링크의 href는 /place/ , /restaurant/ , /hairshop/ , /accommodation/ 등
-        카테고리별로 다르지만, 공통적으로 숫자 ID가 들어간 상세 링크다.
-      - 그 '첫 번째 상세 링크의 텍스트'가 바로 파란 큰 글씨 = 상호명이다.
-      - 카테고리(맛집/미용실/네일/펜션)나 클래스명이 바뀌어도 이 구조는 동일하다.
-
-    JS로 한 번에 li 카드들을 순회하며 {상호명, 부가정보, 링크}를 뽑는다.
+    2단계 추출:
+      Pass 1) 클래스 기반 (지난번 513건 성공한 방식 그대로 — 맛집/카페/디저트)
+      Pass 2) Pass1이 0건이면 JS 구조 기반 fallback (미용실/네일/펜션 등)
+      둘 다 0건이면 HTML/디버그 덤프 후 빈 리스트 반환
     """
     rows = []
+
+    # ============ Pass 1: 클래스 기반 (검증된 방식) ============
+    card_sel = find_first_existing(frame, CARD_SELECTORS)
+    if card_sel:
+        cards = frame.locator(card_sel)
+        count = cards.count()
+        rank = 0
+        for i in range(count):
+            card = cards.nth(i)
+            name = ""
+            for nsel in NAME_SELECTORS:
+                try:
+                    loc = card.locator(nsel).first
+                    if loc.count() > 0:
+                        name = normalize(loc.inner_text(timeout=800))
+                        if name:
+                            break
+                except Exception:
+                    continue
+            if not name:
+                continue
+            try:
+                full = normalize(card.inner_text(timeout=800))
+            except Exception:
+                full = ""
+            href = ""
+            try:
+                href = card.locator("a").first.get_attribute("href") or ""
+            except Exception:
+                pass
+            rank += 1
+            rows.append({
+                "query": query, "page": page_num, "rank": rank,
+                "name": name, "detail": full[:300], "href": href,
+            })
+        if rows:
+            return rows
+
+    # ============ Pass 2: JS 구조 기반 fallback ============
+    # 각 li에서 "가장 제목스러운" 텍스트를 상호명으로 잡는다.
+    # - 라벨/메타 단어(예약, 쿠폰, 광고, 리뷰, 새로오픈 등) 제외
+    # - 너무 짧거나 너무 긴 텍스트 제외
+    # - 한 카드 안에서 첫 번째 적격 텍스트 1개만 사용
     try:
         items = frame.evaluate(
             r"""() => {
-                // 상세페이지로 가는 링크인지 판별 (숫자 ID가 포함된 place 계열 경로)
-                const isPlaceLink = (href) => {
-                    if (!href) return false;
-                    return /\/(place|restaurant|hairshop|nail|beauty|accommodation|hospital|cafe|attraction|place)\/\d+/.test(href)
-                        || /place\.naver\.com\/.*\/\d+/.test(href);
+                const SKIP = new Set([
+                    "예약","주문","톡톡","쿠폰","포장","광고","place+","Npay+","Npay",
+                    "단체석","주차","리뷰많은","요즘뜨는","신선한","분위기좋은",
+                    "새로오픈","영업 종료","영업종료","영업중","영업 중","인기",
+                    "알림받기","찜","공유","길찾기","전화","홈페이지","메뉴",
+                    "거리","네이버지도","즐겨찾기","저장",
+                ]);
+                const isMeta = (t) => {
+                    if (!t) return true;
+                    if (SKIP.has(t)) return true;
+                    if (t.length < 2 || t.length > 40) return true;
+                    if (/^\d+[\d,]*원/.test(t)) return true;       // 가격
+                    if (/^리뷰\s*\d/.test(t)) return true;          // 리뷰 N
+                    if (/^방문자\s*리뷰/.test(t)) return true;
+                    if (/^\d+$/.test(t)) return true;               // 숫자만
+                    if (/^[가-힣]+\s*리뷰/.test(t)) return true;
+                    return false;
                 };
 
-                // 카드 후보: li 중에서 상세링크를 1개 이상 가진 것
+                // li 후보 — 카드 한 칸
                 const lis = Array.from(document.querySelectorAll("li"));
                 const out = [];
-                const seen = new Set();
+                const seenNames = new Set();
 
                 for (const li of lis) {
-                    const anchors = Array.from(li.querySelectorAll("a"));
-                    // 카드 안의 첫 상세링크
-                    let nameLink = null;
-                    for (const a of anchors) {
-                        if (isPlaceLink(a.getAttribute("href"))) { nameLink = a; break; }
+                    // 너무 작은(라벨용) li 는 카드가 아님 — 자식 요소 수가 너무 적으면 스킵
+                    if (li.querySelectorAll("*").length < 5) continue;
+
+                    // 카드 안의 모든 텍스트 노드/요소를 순회하며 첫 적격 텍스트 찾기
+                    const candidates = Array.from(li.querySelectorAll("span, a, strong, h3, h4"));
+                    let name = "";
+                    for (const c of candidates) {
+                        const t = (c.innerText || c.textContent || "").trim().split("\n")[0].trim();
+                        if (!isMeta(t)) { name = t; break; }
                     }
-                    if (!nameLink) continue;
+                    if (!name) continue;
+                    if (seenNames.has(name)) continue;
+                    seenNames.add(name);
 
-                    // 상호명 = 그 링크의 텍스트 (파란 큰 글씨)
-                    let name = (nameLink.innerText || nameLink.textContent || "").trim();
-                    name = name.split("\n")[0].trim();   // 혹시 여러 줄이면 첫 줄
-                    if (!name || name.length < 2) continue;
+                    let href = "";
+                    const a = li.querySelector("a[href]");
+                    if (a) href = a.getAttribute("href") || "";
 
-                    // 중복 카드 방지(같은 li가 중첩 매칭되는 경우)
-                    const href = nameLink.getAttribute("href") || "";
-                    const key = name + "::" + href;
-                    if (seen.has(key)) continue;
-                    seen.add(key);
-
-                    // 부가정보 = 카드 전체 텍스트(한 줄로)
-                    let detail = (li.innerText || "").replace(/\s+/g, " ").trim();
-
+                    const detail = (li.innerText || "").replace(/\s+/g, " ").trim();
                     out.push({ name, detail, href });
                 }
                 return out;
@@ -414,6 +460,15 @@ def extract_names_and_cards(frame, query, page_num):
             "detail": normalize(it.get("detail", ""))[:300],
             "href": it.get("href", ""),
         })
+
+    # ============ 둘 다 0건이면 HTML 덤프 (다음 진단용) ============
+    if not rows and page_num == 1:
+        try:
+            html = frame.content() if hasattr(frame, "content") else ""
+            save_debug(f"list_html_{safe_name(query)}_p1.html", html[:300000])
+        except Exception:
+            pass
+
     return rows
 
 
