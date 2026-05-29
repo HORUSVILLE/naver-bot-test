@@ -41,7 +41,10 @@ jobs:
 
       # ============================================================
       # 결과 메일 발송 (Gmail SMTP)
-      # 사용 전 GitHub Secrets에 MAIL_USERNAME, MAIL_PASSWORD, MAIL_TO 등록 필요
+      # 사용 Secrets:
+      #   GMAIL_USER          - 보낼 Gmail 주소
+      #   GMAIL_APP_PASSWORD  - Gmail 앱 비밀번호 16자리
+      #   MAIL_TO             - 받을 메일 주소
       # ============================================================
       - name: Read summary for mail body
         if: always()
@@ -73,11 +76,11 @@ jobs:
           server_address: smtp.gmail.com
           server_port: 465
           secure: true
-          username: ${{ secrets.MAIL_USERNAME }}
-          password: ${{ secrets.MAIL_PASSWORD }}
+          username: ${{ secrets.GMAIL_USER }}
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
           subject: "[자동발송] 용인 신규오픈 수집 - ${{ github.run_started_at }}"
           to: ${{ secrets.MAIL_TO }}
-          from: ${{ secrets.MAIL_USERNAME }}
+          from: ${{ secrets.GMAIL_USER }}
           body: ${{ steps.read_summary.outputs.body }}
           attachments: output/results.xlsx,output/summary.txt
           ignore_cert: true
