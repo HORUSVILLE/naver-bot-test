@@ -1,44 +1,35 @@
 name: Naver New-Open Bot
 
-# 수동 실행 + (선택) 매일 자동 실행
 on:
-  workflow_dispatch:        # Actions 탭에서 "Run workflow" 버튼으로 수동 실행
-  # 매일 한국시간 오전 9시 자동 실행하려면 아래 2줄의 주석(#)을 제거
-  # schedule:
-  #   - cron: '0 0 * * *'   # UTC 00:00 = 한국시간 09:00
+  workflow_dispatch:        # 수동 실행 버튼
+  schedule:
+    - cron: '0 0 * * *'   # UTC 00:00 = 한국시간 09:00 매일 실행
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 30     # 30분 넘으면 강제 종료(무한 대기 방지)
+    timeout-minutes: 30
 
     steps:
-      # 1) 저장소 코드 가져오기
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) 파이썬 설치
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # 3) 파이썬 패키지 설치
       - name: Install Python packages
         run: |
           python -m pip install --upgrade pip
           pip install playwright openpyxl
 
-      # 4) Playwright 브라우저 + 시스템 의존성 설치 (이게 빠지면 무조건 실패)
       - name: Install Playwright browser
         run: python -m playwright install --with-deps chromium
 
-      # 5) 크롤러 실행
       - name: Run scraper
         run: python main.py
 
-      # 6) 결과물(엑셀/요약/스크린샷) 업로드
-      #    if: always() → 앞 단계가 실패해도 결과 폴더는 무조건 업로드
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
@@ -47,3 +38,46 @@ jobs:
           path: output/
           if-no-files-found: warn
           retention-days: 14
+
+      # ============================================================
+      # 결과 메일 발송 (Gmail SMTP)
+      # 사용 전 GitHub Secrets에 MAIL_USERNAME, MAIL_PASSWORD, MAIL_TO 등록 필요
+      # ============================================================
+      - name: Read summary for mail body
+        if: always()
+        id: read_summary
+        run: |
+          if [ -f output/summary.txt ]; then
+            {
+              echo 'body<<EOF'
+              cat output/summary.txt
+              echo
+              echo '---'
+              echo '자세한 결과는 첨부된 results.xlsx 파일을 확인하세요.'
+              echo 'GitHub Actions 실행: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+              echo EOF
+            } >> $GITHUB_OUTPUT
+          else
+            {
+              echo 'body<<EOF'
+              echo 'summary.txt가 생성되지 않았습니다. 실행 중 오류가 있을 수 있습니다.'
+              echo 'GitHub Actions 실행: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+              echo EOF
+            } >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send result mail
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "[자동발송] 용인 신규오픈 수집 - ${{ github.run_started_at }}"
+          to: ${{ secrets.MAIL_TO }}
+          from: ${{ secrets.MAIL_USERNAME }}
+          body: ${{ steps.read_summary.outputs.body }}
+          attachments: output/results.xlsx,output/summary.txt
+          ignore_cert: true
