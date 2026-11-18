@@ -1,0 +1,16 @@
+# Render.com 무료 웹서비스 배포 설정 (재료 최저가 앱)
+services:
+  - type: web
+    name: order-app
+    runtime: python
+    plan: free
+    rootDir: order_app
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: NAVER_CLIENT_ID
+        sync: false
+      - key: NAVER_CLIENT_SECRET
+        sync: false
+      - key: ACCESS_CODE
+        sync: false
