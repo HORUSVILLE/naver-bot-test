@@ -59,6 +59,10 @@
         <legend>최저가 버튼이 여는 사이트</legend>
         <div id="main-site"></div>
       </fieldset>
+      <label class="radio check">
+        <input id="naver-app" type="checkbox">
+        <span><b>네이버는 네이버 앱으로 열기</b> <span class="hint">휴대폰에 네이버 앱이 없으면 꺼주세요. 끄면 인터넷 브라우저로 열립니다.</span></span>
+      </label>
       <h2>재료 목록 백업</h2>
       <p class="hint">재료 목록은 이 휴대폰(브라우저)에만 저장됩니다. 기기를 바꿀 때는 파일로 옮기세요.</p>
       <button id="export-btn" class="btn">파일로 내보내기</button>
@@ -66,6 +70,12 @@
       <button id="menu-close" class="btn primary">닫기</button>
     </div>
   </dialog>
+
+  <div id="toast" class="toast" role="status" hidden>
+    <span>네이버 앱이 안 열리나요?</span>
+    <a target="_blank" rel="noopener">웹으로 열기 ↗</a>
+    <button id="toast-close" type="button" aria-label="닫기">✕</button>
+  </div>
 
   <script src="sites.js"></script>
   <script src="app.js"></script>

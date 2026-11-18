@@ -5,7 +5,7 @@
 
   const STORE_KEY = "order_app.items.v1";
   const SETTINGS_KEY = "order_app.settings.v1";
-  const { SITES, siteUrl } = window.Sites;
+  const { SITES, siteUrl, naverAppUrl, platform } = window.Sites;
   const $ = (sel) => document.querySelector(sel);
   const today = () => new Date().toISOString().slice(0, 10);
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -32,7 +32,7 @@
   items = items.map((x) => ({ ...x, query: x.query || x.name, memo: x.memo || "" }));
   const save = () => storageSet(STORE_KEY, items);
 
-  let settings = { mainSite: "naver", ...storageGet(SETTINGS_KEY, {}) };
+  let settings = { mainSite: "naver", naverApp: true, ...storageGet(SETTINGS_KEY, {}) };
   if (!SITES.some((s) => s.id === settings.mainSite)) settings.mainSite = "naver";
 
   const siteName = (id) => SITES.find((s) => s.id === id).name;
@@ -62,7 +62,7 @@
       const parts = [];
       if (it.query !== it.name) parts.push(`검색어: ${it.query}`);
       if (it.memo) parts.push(it.memo);
-      if (it.opened) parts.push(`최근 확인 ${it.opened}`);
+      if (it.opened) parts.push(`최근 확인 ${+it.opened.slice(5, 7)}/${+it.opened.slice(8, 10)}`);
       meta.textContent = parts.join(" · ");
       info.append(name, meta);
       head.append(info, button("편집", "btn small ghost", () => openDialog(it)));
@@ -84,18 +84,38 @@
   }
 
   function siteLink(it, siteId, cls, text) {
+    const webUrl = siteUrl(siteId, it.query, navigator.userAgent);
+    const appUrl = siteId === "naver" && settings.naverApp
+      ? naverAppUrl(webUrl, navigator.userAgent, navigator.maxTouchPoints || 0)
+      : null;
+
     const a = document.createElement("a");
     a.className = cls;
-    a.href = siteUrl(siteId, it.query, navigator.userAgent);
+    a.href = webUrl;
     a.target = "_blank";
     a.rel = "noopener";
     a.textContent = text;
-    a.addEventListener("click", () => {
+    a.addEventListener("click", (e) => {
       it.opened = today();
       save();
+      if (appUrl) {
+        e.preventDefault();
+        location.href = appUrl;
+        // 아이폰은 앱이 없을 때 자동으로 웹으로 넘어갈 수 없어 안내를 띄웁니다.
+        if (platform(navigator.userAgent, navigator.maxTouchPoints || 0) === "ios") showFallback(webUrl);
+      }
       setTimeout(renderList, 300);
     });
     return a;
+  }
+
+  let toastTimer = null;
+  function showFallback(webUrl) {
+    const t = $("#toast");
+    t.querySelector("a").href = webUrl;
+    t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { t.hidden = true; }, 8000);
   }
 
   function button(text, cls, onClick) {
@@ -162,7 +182,19 @@
       box.append(label);
     }
   }
-  $("#menu-btn").addEventListener("click", () => { renderSiteChoice(); menu.showModal(); });
+  const naverAppBox = $("#naver-app");
+  naverAppBox.addEventListener("change", () => {
+    settings.naverApp = naverAppBox.checked;
+    storageSet(SETTINGS_KEY, settings);
+    renderList();
+  });
+  $("#toast-close").addEventListener("click", () => { $("#toast").hidden = true; });
+
+  $("#menu-btn").addEventListener("click", () => {
+    renderSiteChoice();
+    naverAppBox.checked = settings.naverApp;
+    menu.showModal();
+  });
   $("#menu-close").addEventListener("click", () => menu.close());
 
   $("#export-btn").addEventListener("click", () => {
