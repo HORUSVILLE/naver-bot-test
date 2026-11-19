@@ -1,0 +1,47 @@
+name: Order App (GitHub Pages)
+
+# order_app 폴더를 GitHub Pages로 무료 배포합니다.
+# 처음 한 번: 저장소 Settings → Pages → Source 를 "GitHub Actions" 로 바꿔주세요.
+on:
+  push:
+    branches: [main]
+    paths: ['order_app/**', '.github/workflows/order-app-pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: order-app-pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Test
+        run: node --test order_app/tests/*.test.js
+
+      - name: Prepare site
+        run: |
+          mkdir -p _site
+          cp order_app/index.html order_app/app.js order_app/sites.js \
+             order_app/style.css order_app/manifest.json order_app/icon.svg _site/
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

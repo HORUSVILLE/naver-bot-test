@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>재료 최저가</title>
+  <meta name="theme-color" content="#1f7a4d">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="view">
+    <header class="topbar">
+      <h1>재료 최저가</h1>
+      <button id="menu-btn" class="icon-btn" aria-label="메뉴">⋯</button>
+    </header>
+
+    <p class="intro">재료의 <b>최저가</b> 버튼을 누르면 쇼핑몰이 <b>낮은 가격순</b>으로 열립니다. 수량과 결제는 열린 화면에서 직접 하세요.</p>
+
+    <div class="toolbar">
+      <input id="filter" type="search" placeholder="재료 이름으로 찾기" autocomplete="off">
+      <button id="add-btn" class="btn primary">+ 재료 추가</button>
+    </div>
+
+    <ul id="items" class="items"></ul>
+    <p id="empty" class="empty" hidden>아직 등록된 재료가 없습니다.<br><b>+ 재료 추가</b>로 자주 사는 재료를 올려주세요.</p>
+    <p id="no-match" class="empty" hidden>찾는 재료가 없습니다.</p>
+  </main>
+
+  <!-- 재료 추가/편집 -->
+  <dialog id="item-dialog">
+    <form id="item-form" method="dialog">
+      <h2 id="dialog-title">재료 추가</h2>
+      <label>재료 이름 *
+        <input name="name" required maxlength="40" placeholder="예: 설탕">
+      </label>
+      <label>검색어 <span class="hint">비우면 재료 이름으로 검색. 용량까지 넣으면 더 정확합니다.</span>
+        <input name="query" maxlength="100" placeholder="예: 백설 하얀설탕 15kg">
+      </label>
+      <label>메모
+        <input name="memo" maxlength="100" placeholder="예: 2주에 1포대, 지난번 21,000원">
+      </label>
+      <div class="actions">
+        <button type="button" id="delete-btn" class="btn danger ghost" hidden>삭제</button>
+        <span class="spacer"></span>
+        <button type="button" id="cancel-btn" class="btn">취소</button>
+        <button type="submit" class="btn primary">저장</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 메뉴 -->
+  <dialog id="menu-dialog">
+    <div class="menu">
+      <h2>설정</h2>
+      <fieldset>
+        <legend>최저가 버튼이 여는 사이트</legend>
+        <div id="main-site"></div>
+      </fieldset>
+      <label class="radio check">
+        <input id="naver-app" type="checkbox">
+        <span><b>네이버는 네이버 앱으로 열기</b> <span class="hint">휴대폰에 네이버 앱이 없으면 꺼주세요. 끄면 인터넷 브라우저로 열립니다.</span></span>
+      </label>
+      <h2>재료 목록 백업</h2>
+      <p class="hint">재료 목록은 이 휴대폰(브라우저)에만 저장됩니다. 기기를 바꿀 때는 파일로 옮기세요.</p>
+      <button id="export-btn" class="btn">파일로 내보내기</button>
+      <label class="btn file-btn">파일에서 가져오기<input id="import-input" type="file" accept="application/json,.json" hidden></label>
+      <button id="menu-close" class="btn primary">닫기</button>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" hidden>
+    <span>네이버 앱이 안 열리나요?</span>
+    <a target="_blank" rel="noopener">웹으로 열기 ↗</a>
+    <button id="toast-close" type="button" aria-label="닫기">✕</button>
+  </div>
+
+  <script src="sites.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
